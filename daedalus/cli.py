@@ -63,6 +63,86 @@ def cli(ctx: click.Context, project: Optional[str]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# CLAUDE.md template for new projects
+# ---------------------------------------------------------------------------
+
+_CLAUDE_MD_TEMPLATE = """\
+# Daedalus Research Project
+
+This project uses **Daedalus** for experiment management.
+All experiment lifecycle operations MUST go through Daedalus MCP tools (`daedalus_*`).
+
+## DO
+
+- Use `daedalus_*` MCP tools for ALL experiment operations \
+(create, launch, poll, reflect, compare, logs)
+- Use `daedalus_*` MCP tools for research memory \
+(save_note, read_notes, update_program)
+- Use `daedalus_*` MCP tools for literature \
+(search_papers, add_paper, literature_review)
+- Use `daedalus_*` MCP tools for the research plan \
+(get_plan, create_plan, update_plan, update_plan_step)
+- Use `daedalus_remote_exec` to debug remote environments \
+(GPU status, packages, disk space)
+- Use Claude Code tools (Read, Edit, Bash) for training code, \
+data files, and shell commands on the user's codebase
+- After launching experiments, **immediately start monitoring** \
+with background watchdog agents (see Monitoring below)
+- Save notes after key decisions and dead ends — \
+memory persists across sessions
+- Search for relevant papers before creating a research plan
+- Ask the user about approach level before planning: \
+quick (~3-5 exp), thorough (~10-20), production-ready (~20-30+)
+
+## DO NOT
+
+- Do NOT read or write files in `ledger/` directly — managed by Daedalus
+- Do NOT import from `daedalus.*` in Bash — use the MCP tools
+- Do NOT use `Bash(sleep N)` to wait for experiments
+- Do NOT use CronCreate or any invented polling mechanism
+- Do NOT use `ssh` via Bash — use `daedalus_remote_exec` instead
+- Do NOT use `remote_exec` for things with a dedicated tool:
+  - Experiment status -> `daedalus_poll_experiment`
+  - Training logs -> `daedalus_get_experiment_logs`
+
+## Monitoring Experiments
+
+After launching experiments, monitor them with background watchdog agents.
+NEVER block the main conversation with sleep or inline polling loops.
+
+Launch one watchdog per experiment using Claude Code's Agent tool:
+
+```
+Agent(
+  description="Watch exp_ID",
+  prompt="Monitor experiment exp_ID. Do 3-5 cycles: \
+(1) daedalus_poll_experiment, (2) daedalus_get_experiment_logs(tail=30), \
+(3) check for NaN loss, OOM, process death. If completed or problem, return immediately. \
+Otherwise sleep 60 and repeat. After 5 cycles return progress report.",
+  subagent_type="general-purpose",
+  run_in_background=true
+)
+```
+
+When a watchdog returns: show status to user, react to alerts, do productive work \
+(reflect, search papers, prepare next experiment), relaunch watchdog if still running.
+
+## Workflow
+
+1. Read research memory: `daedalus_read_notes`
+2. Get context: `daedalus_get_context(mode="full")`
+3. Check plan: `daedalus_get_plan`
+4. Follow the plan or ask the user what to do next
+
+## Key Files
+
+- `program.md` — research goals and metrics
+- `daedalus.yaml` — project config (runner, scripts, stack)
+- `runner_config.yaml` — SSH host configuration
+- `ledger/` — experiment data (managed by Daedalus, do not edit)
+"""
+
+# ---------------------------------------------------------------------------
 # init
 # ---------------------------------------------------------------------------
 
@@ -178,37 +258,7 @@ def init(name: str, path: str) -> None:
     # CLAUDE.md — tells Claude Code to use Daedalus MCP tools
     claude_md = project_dir / "CLAUDE.md"
     if not claude_md.exists():
-        claude_md.write_text(
-            "# Daedalus Research Project\n\n"
-            "This project uses **Daedalus** for experiment management. "
-            "All experiment lifecycle operations MUST go through Daedalus MCP tools.\n\n"
-            "## Rules\n\n"
-            "- Use `daedalus_*` MCP tools for ALL experiment operations "
-            "(create, launch, poll, reflect, compare, logs)\n"
-            "- Use `daedalus_*` MCP tools for research memory "
-            "(save_note, read_notes, update_program)\n"
-            "- Use `daedalus_*` MCP tools for literature "
-            "(search_papers, add_paper, literature_review)\n"
-            "- Use `daedalus_*` MCP tools for the research plan "
-            "(get_plan, create_plan, update_plan, update_plan_step)\n"
-            "- Use `daedalus_remote_exec` to debug remote environments "
-            "(GPU status, packages, disk space)\n"
-            "- Do NOT read or write files in `ledger/` directly — "
-            "they are managed by Daedalus\n"
-            "- Do NOT import from `daedalus.*` in Bash — use the MCP tools\n"
-            "- Use Claude Code tools (Read, Edit, Bash) ONLY for the training code, "
-            "data files, and shell commands on the user's codebase\n\n"
-            "## Workflow\n\n"
-            "1. Read research memory: `daedalus_read_notes`\n"
-            "2. Get context: `daedalus_get_context(mode=\"full\")`\n"
-            "3. Check plan: `daedalus_get_plan`\n"
-            "4. Follow the plan or ask the user what to do next\n\n"
-            "## Key Files\n\n"
-            "- `program.md` — research goals and metrics\n"
-            "- `daedalus.yaml` — project config (runner, scripts, stack)\n"
-            "- `runner_config.yaml` — SSH host configuration\n"
-            "- `ledger/` — experiment data (managed by Daedalus, do not edit)\n"
-        )
+        claude_md.write_text(_CLAUDE_MD_TEMPLATE)
 
     console.print(f"[green]Project '{name}' initialized at {project_dir}[/green]")
     console.print(f"  Edit [bold]{project_dir}/program.md[/bold] to define your research goals.")

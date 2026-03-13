@@ -468,7 +468,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "properties": {
                 "focus": {
                     "type": "string",
-                    "description": "Focus topic (e.g., 'calibration', 'reward design'). Omit for broad review.",
+                    "description": "Focus topic (e.g., 'learning rate scheduling', 'data augmentation'). Omit for broad review.",
                 },
                 "include_search": {
                     "type": "boolean",

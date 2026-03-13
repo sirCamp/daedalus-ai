@@ -132,24 +132,33 @@ After `launch_experiment`, the response includes monitoring hints:
 - `suggested_poll_interval_seconds` (60s for SSH, 10s for local)
 - `while_waiting` — productive tasks to do between polls
 
-**Use background watchdog agents with a natural relaunch cycle.**
+**CRITICAL monitoring rules:**
+- NEVER use `Bash(sleep N)` in the main conversation to wait for experiments
+- NEVER use CronCreate, loops, or any invented polling mechanism
+- NEVER poll inline in a blocking loop
+- ONLY use the **background watchdog agent pattern** described below
 
-#### Background Watchdog Agent
+**Use Claude Code's Agent tool to launch background watchdog agents.**
 
-Launch one background watchdog per running experiment. The watchdog does **3-5 polls** with `sleep 60` between them (~3-5 min total), then returns a report:
+#### How It Works (concrete example)
 
-1. **Loop 3-5 times**:
-   - `daedalus_poll_experiment` — check state
-   - `daedalus_get_experiment_logs(tail=30)` — extract loss, step, ETA
-   - If **problem detected** (NaN/Inf loss, OOM, CUDA error, process died) → stop immediately and return ALERT report
-   - If **experiment completed** → return final results report
-   - Otherwise → `sleep 60` and continue
-2. After 3-5 polls with no completion or alert, **return a progress report** (current step, loss, ETA, health status)
+After launching experiments, use Claude Code's `Agent` tool to spawn a background watchdog:
 
-The watchdog returns after ~3-5 minutes with one of:
-- **COMPLETED** — final metrics, ready for analysis
-- **ALERT** — problem detected, diagnosis, suggested fix
-- **PROGRESS** — still running, current step/loss/ETA, healthy
+```
+Agent(
+  description="Watch exp_abc123",
+  prompt="Monitor experiment exp_abc123. Do 3-5 cycles of: (1) call daedalus_poll_experiment with exp_id exp_abc123, (2) call daedalus_get_experiment_logs with exp_id exp_abc123 and tail=30, (3) check for problems (NaN loss, OOM, process died). If completed or problem detected, return immediately with a report. Otherwise sleep 60 and repeat. After 5 cycles, return a progress report with current step, loss, and ETA.",
+  subagent_type="general-purpose",
+  run_in_background=true
+)
+```
+
+Launch **one watchdog per running experiment**. Each watchdog:
+
+1. Does 3-5 poll cycles with `sleep 60` between them (~5 min total)
+2. On **problem detected** (NaN/Inf loss, OOM, CUDA error, process died) → returns ALERT immediately
+3. On **experiment completed** → returns final results
+4. After 3-5 cycles with no event → returns a PROGRESS report (step, loss, ETA)
 
 #### Main Agent Cycle
 
@@ -170,7 +179,7 @@ When a watchdog returns, the main agent reactivates:
 4. **Relaunch watchdog(s)** for experiments still running
 5. Wait for next watchdog return (or user input)
 
-This creates a natural cycle: watchdog returns every ~5 min → main agent wakes up → shows status → does work → relaunches → waits. The agent may also be idle waiting — that's fine, the watchdog will reactivate it.
+This creates a natural cycle: watchdog returns every ~5 min → main agent wakes up → shows status → does work → relaunches → waits.
 
 ## Research Principles
 
@@ -195,14 +204,36 @@ This creates a natural cycle: watchdog returns every ~5 min → main agent wakes
 1. Read the program goals: `daedalus_get_context(mode="full")`
 2. Check available scripts: `daedalus_list_scripts`
 3. Inspect the dataset: `daedalus_inspect_dataset` + `daedalus_validate_dataset`
-4. Search for relevant papers: `daedalus_search_papers` → `daedalus_add_paper`
-5. Create a research plan: `daedalus_create_plan` with 3-7 prioritized steps
+4. **Literature review** — before creating a plan, search for relevant work:
+   - `daedalus_search_papers` for the task/model/technique
+   - Add key papers: `daedalus_add_paper` with relevance notes
+   - Look for recommended hyperparameters, known baselines, and common pitfalls
+   - This informs step design: realistic expected outcomes, proven techniques to try
+5. **Ask the user about the approach** — before creating the plan, ask:
+   > What level of depth do you want?
+   > - **Quick exploration**: baselines only, compare models, pick the best. ~3-5 experiments.
+   > - **Thorough tuning**: baselines + hyperparameter search (lr, LoRA rank, epochs). ~10-20 experiments.
+   > - **Production-ready**: full tuning + full dataset + eval battery + multiple seeds. ~20-30+ experiments.
+
+   This determines how many plan steps to create, whether to include HP tuning steps, and what guardrails to set (e.g., `max_experiments`).
+6. Create a research plan: `daedalus_create_plan` with steps matching the chosen approach
    - Set `autonomy="autonomous"` (default — Claude Code is already human-in-the-loop)
    - Set guardrails: `max_experiments`, `max_consecutive_failures`
    - Mark expensive steps with `requires_confirmation: true`
 6. Start with the first actionable step (baseline experiment)
 7. Launch with `plan_step_id` to enable auto-bookkeeping
-8. Poll periodically, do productive work between polls
+8. **Immediately start monitoring** — launch watchdogs and do productive work (see Monitoring Pattern)
+
+**IMPORTANT**: After launching experiments, do NOT stop and wait for the user to say "monitor". Automatically start the watchdog cycle and do productive work. The user expects you to be autonomous.
+
+### Hyperparameter Tuning
+When reaching a tuning step in the plan:
+1. **Search for recommended parameters** — use `daedalus_search_papers` and web search to find recommended hyperparameter ranges for the specific model/task (e.g., "LoRA rank for Qwen fine-tuning", "learning rate for VLM OCR")
+2. **Check what others use** — look at HuggingFace model cards, paper appendices, and community benchmarks for proven configs
+3. **Use `daedalus_suggest_next`** — after 2+ experiments, this tool analyzes your results and suggests which parameter to change and in which direction
+4. **One variable at a time** — each experiment changes ONE parameter from the best config so far
+5. **Design 2-3 experiments** for the most impactful parameter (e.g., lr=[1e-4, 5e-5, 1e-5]), launch them, monitor, then move to the next parameter
+6. Save insights: `daedalus_save_note` with what worked and what didn't
 
 ### Iterating on Results
 1. Review completed experiments: `daedalus_list_experiments(status="completed")`
@@ -211,7 +242,7 @@ This creates a natural cycle: watchdog returns every ~5 min → main agent wakes
 4. Form hypothesis about what to try next
 5. Create experiment with `baseline_id` pointing to best so far
 6. Launch with `plan_step_id` if following a plan (auto-bookkeeping handles the rest)
-7. Poll periodically — do productive work while waiting (reflect on previous, search papers, prepare next)
+7. **Immediately start monitoring** — launch watchdogs, do productive work while waiting
 8. After completion, add reflection: `daedalus_add_reflection` (auto-copies to plan step)
 9. Save key insight: `daedalus_save_note`
 
@@ -237,6 +268,8 @@ This creates a natural cycle: watchdog returns every ~5 min → main agent wakes
   - To check experiment status → use `daedalus_poll_experiment`, NOT `remote_exec` + `cat status.json`
   - To read training logs → use `daedalus_get_experiment_logs`, NOT `remote_exec` + `tail logs/stderr.log`
   - To check GPU/disk/packages → `remote_exec` is correct (no dedicated tool for these)
+- **Never** use `Bash(sleep N)` in the main conversation to wait for experiments — this blocks everything. Use background watchdog agents instead (see Monitoring Pattern).
+- **Never** poll experiments inline in a loop — launch a background watchdog, then do productive work while it checks.
 - **Never** run experiments without checking the data first
 - **Never** change multiple parameters at once without justification
 - **Never** skip the reflection step — even failed experiments teach something

@@ -3,7 +3,7 @@
 import json
 import pytest
 
-from daedalus.data.loader import load_dataset
+from daedalus.data.loader import load_dataset, _sanitize_record, _sanitize_value
 
 
 class TestLoadDataset:
@@ -87,3 +87,46 @@ class TestLoadDataset:
         result, fmt = load_dataset(str(f))
         assert result == []
         assert fmt == "jsonl"
+
+
+class TestSanitizeRecord:
+    def test_primitives_unchanged(self):
+        record = {"a": 1, "b": "hello", "c": 3.14, "d": True, "e": None}
+        assert _sanitize_record(record) == record
+
+    def test_pil_image_converted(self):
+        from PIL import Image
+        img = Image.new("RGB", (100, 200))
+        record = {"image": img, "text": "hello"}
+        result = _sanitize_record(record)
+        assert result["text"] == "hello"
+        assert "Image" in result["image"]
+        assert "100x200" in result["image"]
+        assert "RGB" in result["image"]
+
+    def test_bytes_converted(self):
+        record = {"data": b"\x00\x01\x02"}
+        result = _sanitize_record(record)
+        assert "bytes" in result["data"]
+        assert "3" in result["data"]
+
+    def test_nested_list(self):
+        from PIL import Image
+        img = Image.new("L", (10, 10))
+        record = {"items": [1, "text", img]}
+        result = _sanitize_record(record)
+        assert result["items"][0] == 1
+        assert result["items"][1] == "text"
+        assert "Image" in result["items"][2]
+
+    def test_nested_dict(self):
+        record = {"meta": {"size": 100, "data": b"\xff"}}
+        result = _sanitize_record(record)
+        assert result["meta"]["size"] == 100
+        assert "bytes" in result["meta"]["data"]
+
+    def test_unknown_type_fallback(self):
+        class CustomObj:
+            pass
+        result = _sanitize_value(CustomObj())
+        assert "CustomObj" in result

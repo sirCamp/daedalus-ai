@@ -9,7 +9,7 @@ Manage your research plan using Daedalus MCP tools.
 ## What This Command Does
 
 1. Checks if a plan already exists (`daedalus_get_plan`)
-2. If no plan: reviews context, suggests steps, creates a plan (`daedalus_create_plan`)
+2. If no plan: runs literature review, asks about approach level, creates a plan
 3. If plan exists: shows progress, autonomy mode, guardrails, next actionable step
 4. Optionally updates step status, switches autonomy mode, or adds new steps
 
@@ -25,18 +25,22 @@ Manage your research plan using Daedalus MCP tools.
 1. Get full research context: `daedalus_get_context(mode="full")`
 2. Check existing plan: `daedalus_get_plan`
 3. If no plan exists:
-   - Analyze the research goals from program.md
-   - Search relevant papers: `daedalus_search_papers`
-   - Create a plan with 3-7 steps, each with:
-     - **Description**: what to test (one variable)
-     - **Rationale**: why it matters
-     - **Expected outcome**: what we predict
-     - **Priority**: 1 (highest) to 5
-     - **Dependencies**: which steps must complete first
-     - **requires_confirmation**: true for expensive/risky steps
-   - Set autonomy mode: `autonomous` (default) or `supervised`
-   - Set guardrails: `max_experiments`, `max_consecutive_failures`
-   - Save the plan: `daedalus_create_plan`
+   a. **Literature review** — search for relevant work before planning:
+      - `daedalus_search_papers` for the task/model/technique
+      - Add key papers: `daedalus_add_paper` with relevance notes
+      - Look for recommended hyperparameters, known baselines, common pitfalls
+      - This informs step design: realistic expected outcomes, proven techniques
+   b. **Ask the user about approach level**:
+      > What level of depth do you want?
+      > - **Quick exploration**: baselines only, compare models, pick the best. ~3-5 experiments.
+      > - **Thorough tuning**: baselines + hyperparameter search (lr, LoRA rank, epochs). ~10-20 experiments.
+      > - **Production-ready**: full tuning + full dataset + eval battery + multiple seeds. ~20-30+ experiments.
+   c. Create a plan with steps matching the chosen approach:
+      - Each step: description, rationale, expected outcome, priority (1-5), dependencies
+      - Mark expensive steps with `requires_confirmation: true`
+      - Set `autonomy="autonomous"` (default)
+      - Set guardrails: `max_experiments`, `max_consecutive_failures`
+      - Save: `daedalus_create_plan`
 4. If plan exists:
    - Show current progress (done/failed/total)
    - Show autonomy mode and guardrail status
@@ -70,28 +74,34 @@ When a guardrail triggers, the plan is **paused**. Resume with `daedalus_update_
 ```
 User: /daedalus:plan
 
-Agent: Let me check the current research plan...
+Agent: [calls daedalus_get_context, daedalus_get_plan]
+       No plan found. Let me search for relevant work first.
 
-Research Plan: Optimize calibration for QRC model
-Mode: autonomous | Experiments: 3/10 | Failures: 0/2
-Progress: 2/5 done
+       [calls daedalus_search_papers("LoRA fine-tuning text classification")]
+       Found 5 relevant papers. Adding key ones to library.
+       [calls daedalus_add_paper for top 3]
 
-S01 [done] — Baseline with default parameters (exp_003)
-S02 [done] — Test learning rate 1e-5 (exp_004)
-S03 [pending] — Test IDK penalty -0.5 [NEXT]
-S04 [pending] — Add FiSCoRe agreement (depends on S03)
-S05 [pending] — Final evaluation battery [requires confirmation]
+       What level of depth do you want?
+       - Quick exploration (~3-5 experiments)
+       - Thorough tuning (~10-20 experiments)
+       - Production-ready (~20-30+ experiments)
 
-Next actionable: S03 — Test IDK penalty -0.5
-Shall I design this experiment?
+User: thorough tuning
 
-User: si, e poi mettilo in autonomous che vado a dormire
+Agent: [creates plan with 7 steps, max_experiments=20, autonomous mode]
 
-Agent: [designs and launches experiment with plan_step_id="S03"]
-       [calls daedalus_update_plan(autonomy="autonomous")]
-       Done. Plan switched to autonomous mode. I'll continue with the
-       remaining steps overnight. Guardrails: max 10 experiments, pause
-       after 2 consecutive failures.
+       Research Plan: Optimize fine-tuning for text classification
+       Mode: autonomous | Max experiments: 20 | Max failures: 2
+
+       S01 [pending] — Baseline with default parameters [NEXT]
+       S02 [pending] — Test learning rate 1e-5 (depends on S01)
+       S03 [pending] — Test batch size 32 (depends on S01)
+       S04 [pending] — Test LoRA rank 64 (depends on S01)
+       S05 [pending] — HP tuning: lr grid search (depends on S02)
+       S06 [pending] — HP tuning: batch size sweep (depends on S03)
+       S07 [pending] — Final evaluation battery [requires confirmation]
+
+       Ready to start with S01. Use /daedalus:experiment to launch.
 ```
 
 ## Related Commands
@@ -99,3 +109,4 @@ Agent: [designs and launches experiment with plan_step_id="S03"]
 - `/daedalus:experiment` — Design and launch a single experiment
 - `/daedalus:research-status` — Full project overview
 - `/daedalus:analyze` — Analyze completed results
+- `/daedalus:literature-review` — Search papers and build library

@@ -535,6 +535,94 @@ The `suggest_next` tool analyzes experiment history and suggests what to try:
 
 ## Experiment Monitoring
 
+### MCP Monitoring Pattern (Claude Code)
+
+When using Daedalus via MCP in Claude Code, experiments are monitored with **background watchdog agents** — not sleep loops or inline polling.
+
+After launching experiments, Claude Code spawns one background Agent per experiment:
+
+```
+Agent(
+  description="Watch exp_abc123",
+  prompt="Monitor experiment exp_abc123. Do 3-5 cycles of:
+    (1) call daedalus_poll_experiment with exp_id exp_abc123,
+    (2) call daedalus_get_experiment_logs with exp_id exp_abc123 and tail=30,
+    (3) check for problems (NaN loss, OOM, process died).
+    If completed or problem detected, return immediately with a report.
+    Otherwise sleep 60 and repeat. After 5 cycles, return a progress report.",
+  subagent_type="general-purpose",
+  run_in_background=true
+)
+```
+
+Each watchdog returns one of:
+- **COMPLETED** — final metrics, ready for analysis
+- **ALERT** — problem detected (NaN, OOM, CUDA error), with diagnosis
+- **PROGRESS** — still running, current step/loss/ETA
+
+When a watchdog returns, the main agent shows status, reacts to alerts, does productive work (reflect, search papers, prepare next experiment), and relaunches the watchdog if the experiment is still running.
+
+**Anti-patterns**: Never use `Bash(sleep N)` in the main conversation. Never use CronCreate or any invented polling mechanism. Never poll inline in a loop.
+
+#### Real-World Example
+
+Here's what a monitoring session looks like in practice — Claude Code launches experiments, spawns watchdogs, does productive work, and reacts when results come in:
+
+```
+Agent: Two experiments launched. Let me start monitoring.
+
+       [Agent("Watch exp_6eea6a", ..., run_in_background=true)]
+       [Agent("Watch exp_34555d", ..., run_in_background=true)]
+
+       While they train, let me check if we can improve logging for next runs...
+
+       [Read train.py]
+       [Edit train.py — adds log_level="info", save_steps=50]
+
+       Done. For future experiments:
+       - log_level="info" — loss values will print to stdout
+       - save_steps=50 — checkpoints every 50 steps for earlier visibility
+
+       Current Status
+
+       | Experiment | Model     | Step    | ETA   | Health  |
+       |------------|-----------|---------|-------|---------|
+       | exp_6eea6a | Model-0.8B | ~51/375 | ~3.5h | Healthy |
+       | exp_34555d | Model-2B   | ~39/375 | ~4.8h | Healthy |
+
+       Watchdogs running. They'll report back when epoch 1 completes.
+
+--- (watchdog returns ~5 min later) ---
+
+Agent "Watch exp_6eea6a" completed:
+       exp_6eea6a: step 72/375, loss=2.31, ~2.5h remaining — healthy
+
+Agent: [relaunches watchdog for exp_6eea6a]
+       While waiting, let me search for papers on learning rate schedules...
+       [daedalus_search_papers("warmup learning rate fine-tuning")]
+       [daedalus_add_paper(...)]
+
+--- (watchdog returns: COMPLETED) ---
+
+Agent "Watch exp_6eea6a" completed:
+       exp_6eea6a COMPLETED — eval_loss=0.28, accuracy=0.94
+
+Agent: [daedalus_compare_experiments(exp_ids=["exp_6eea6a", "exp_34555d_baseline"])]
+       [daedalus_add_reflection(...)]
+       [daedalus_save_note(category="insight", ...)]
+
+       exp_6eea6a vs baseline:
+       - accuracy: 0.91 -> 0.94 (+3.3%)
+       - eval_loss: 0.35 -> 0.28 (-20%)
+       Hypothesis CONFIRMED: lower learning rate improved convergence.
+
+       exp_34555d still running (~1.5h). Preparing next experiment config...
+```
+
+The cycle repeats: watchdog returns → show status → react → productive work → relaunch → wait.
+
+### CLI Monitoring
+
 The watcher tails training logs in real-time and emits structured events:
 
 ```bash
@@ -644,7 +732,7 @@ Demonstrates: plan mode, HuggingFace integration, learning rate search, reflecti
 # Install with dev dependencies
 pip install -e ".[dev]"
 
-# Run tests (472 tests)
+# Run tests (478 tests)
 python -m pytest tests/ -q
 
 # Run with coverage

@@ -112,10 +112,39 @@ def _load_huggingface(
         split_name = list(ds.keys())[0]
         ds = ds[split_name]
 
-    records = [dict(row) for row in ds]
+    records = [_sanitize_record(dict(row)) for row in ds]
 
     if sample_n and len(records) > sample_n:
         rng = random.Random(seed)
         records = rng.sample(records, sample_n)
 
     return records, "huggingface"
+
+
+def _sanitize_record(record: dict) -> dict:
+    """Convert non-serializable values (PIL Images, bytes, etc.) to metadata."""
+    sanitized = {}
+    for key, value in record.items():
+        sanitized[key] = _sanitize_value(value)
+    return sanitized
+
+
+def _sanitize_value(value: Any) -> Any:
+    """Convert a single value to a JSON-serializable form."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, bytes):
+        return f"<bytes, {len(value)} bytes>"
+    if isinstance(value, (list, tuple)):
+        return [_sanitize_value(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _sanitize_value(v) for k, v in value.items()}
+    # PIL Image or similar
+    try:
+        from PIL import Image
+        if isinstance(value, Image.Image):
+            return f"<Image mode={value.mode} size={value.size[0]}x{value.size[1]}>"
+    except ImportError:
+        pass
+    # Fallback: use type name
+    return f"<{type(value).__name__}>"
