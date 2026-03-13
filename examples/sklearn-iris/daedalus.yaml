@@ -1,0 +1,42 @@
+project_name: sklearn-iris
+
+runner:
+  type: local
+
+higher_is_better:
+  accuracy: true
+  f1_macro: true
+
+stack:
+  python: "3.10"
+  libraries:
+    - scikit-learn
+
+scripts:
+  train:
+    path: train.py
+    description: "Train a RandomForest on Iris dataset"
+    parameters:
+      n_estimators:
+        type: int
+        default: 100
+        choices: [10, 50, 100, 200, 500]
+        description: "Number of trees"
+      max_depth:
+        type: int
+        default: null
+        range: [2, 20]
+        description: "Max tree depth (null = unlimited)"
+      min_samples_split:
+        type: int
+        default: 2
+        range: [2, 10]
+        description: "Min samples to split a node"
+      test_size:
+        type: float
+        default: 0.2
+        description: "Test split ratio"
+      seed:
+        type: int
+        default: 42
+        description: "Random seed"

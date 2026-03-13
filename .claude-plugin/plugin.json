@@ -1,0 +1,28 @@
+{
+  "name": "daedalus-ai",
+  "version": "0.1.0",
+  "description": "AI research assistant for hypothesis-driven ML experiments. Manages experiment lifecycle, dataset validation, parameter exploration, and literature review.",
+  "author": {
+    "name": "Stefano Campese",
+    "url": "https://github.com/sirCamp"
+  },
+  "repository": "https://github.com/sirCamp/daedalus-ai",
+  "license": "MIT",
+  "keywords": [
+    "ml",
+    "research",
+    "experiments",
+    "hypothesis-driven",
+    "ai-assistant",
+    "mcp"
+  ],
+  "agents": [
+    "./agents/research-assistant.md"
+  ],
+  "commands": [
+    "./commands/"
+  ],
+  "skills": [
+    "./skills/"
+  ]
+}

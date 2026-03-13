@@ -1,0 +1,75 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "daedalus-ai"
+version = "0.1.0"
+description = "AI research assistant for hypothesis-driven ML experiments. Claude Code MCP plugin for managing experiment lifecycle, dataset validation, and parameter exploration."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "Stefano Campese" },
+]
+keywords = [
+    "ml", "research", "experiments", "ai-assistant",
+    "mcp", "claude-code", "hypothesis-driven",
+    "hyperparameter-optimization", "experiment-tracking",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "pydantic>=2.0",
+    "httpx>=0.25.0",
+    "rich>=13.0",
+    "click>=8.0",
+    "pyyaml>=6.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/sirCamp/daedalus-ai"
+Documentation = "https://github.com/sirCamp/daedalus-ai#readme"
+Repository = "https://github.com/sirCamp/daedalus-ai"
+Issues = "https://github.com/sirCamp/daedalus-ai/issues"
+
+[project.optional-dependencies]
+agent = [
+    "anthropic>=0.40",
+]
+mcp = [
+    "mcp>=1.0",
+]
+data = [
+    "datasets>=2.14",
+    "pyarrow>=12.0",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=4.0",
+]
+all = [
+    "daedalus-ai[agent,mcp,data]",
+]
+
+[project.scripts]
+daedalus = "daedalus.cli:cli"
+
+[tool.setuptools.packages.find]
+include = ["daedalus*"]
+
+[tool.setuptools.package-data]
+daedalus = ["runners/sentinel.sh"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

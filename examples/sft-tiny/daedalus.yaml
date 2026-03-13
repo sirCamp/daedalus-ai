@@ -1,0 +1,72 @@
+project_name: sft-tiny
+
+runner:
+  type: local
+
+higher_is_better:
+  loss: false
+  train_loss: false
+  train_samples_per_second: true
+
+stack:
+  python: "3.10"
+  requirements: requirements.txt
+  libraries:
+    - transformers
+    - trl
+    - datasets
+    - torch
+  docs:
+    - https://huggingface.co/docs/trl/
+
+scripts:
+  train:
+    path: train.py
+    description: "SFT training with TRL on SmolLM2-135M"
+    parameters:
+      model_name:
+        type: str
+        default: "HuggingFaceTB/SmolLM2-135M-Instruct"
+        description: "HuggingFace model ID"
+      dataset:
+        type: str
+        default: "HuggingFaceTB/smoltalk"
+        description: "HuggingFace dataset ID"
+      dataset_split:
+        type: str
+        default: "train[:1000]"
+        description: "Dataset split (use small slice for demos)"
+      learning_rate:
+        type: float
+        default: 5e-5
+        range: [1e-6, 1e-3]
+        description: "Learning rate"
+      batch_size:
+        type: int
+        default: 4
+        choices: [1, 2, 4, 8]
+        description: "Per-device batch size"
+      num_epochs:
+        type: int
+        default: 1
+        range: [1, 5]
+        description: "Number of training epochs"
+      max_length:
+        type: int
+        default: 512
+        choices: [256, 512, 1024]
+        description: "Maximum sequence length"
+      gradient_accumulation_steps:
+        type: int
+        default: 4
+        choices: [1, 2, 4, 8]
+        description: "Gradient accumulation steps"
+      warmup_ratio:
+        type: float
+        default: 0.1
+        range: [0.0, 0.3]
+        description: "Warmup ratio"
+      seed:
+        type: int
+        default: 42
+        description: "Random seed"
