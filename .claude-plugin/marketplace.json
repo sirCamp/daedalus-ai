@@ -1,0 +1,38 @@
+{
+  "name": "daedalus-ai",
+  "owner": {
+    "name": "Stefano Campese",
+    "email": "sircampydevelop@gmail.com"
+  },
+  "metadata": {
+    "description": "AI research assistant for hypothesis-driven ML experiments",
+    "version": "0.2.0"
+  },
+  "plugins": [
+    {
+      "name": "daedalus-ai",
+      "source": ".",
+      "description": "AI research assistant for hypothesis-driven ML experiments. MCP tools for experiment lifecycle, dataset validation, parameter exploration, and literature review.",
+      "version": "0.2.0",
+      "license": "MIT",
+      "keywords": [
+        "ml",
+        "research",
+        "experiments",
+        "hypothesis-driven",
+        "mcp",
+        "training",
+        "fine-tuning",
+        "hyperparameter",
+        "ai-assistant"
+      ],
+      "category": "ml-research",
+      "tags": [
+        "machine-learning",
+        "experiment-tracking",
+        "research-assistant",
+        "mcp-server"
+      ]
+    }
+  ]
+}

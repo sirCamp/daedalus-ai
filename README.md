@@ -22,17 +22,34 @@ Running ML experiments involves a repetitive loop: change a parameter, launch tr
 
 ## Installation
 
+### Option A — Plugin Marketplace (recommended)
+
 ```bash
-# Install the package
+# 1. Install the Python package
+pip install daedalus-ai
+# or from source:
 pip install -e .
 
-# Register MCP server globally + install agents, commands, skills + auto-approve tools
-daedalus install-mcp
-
-# Restart Claude Code
+# 2. Add the marketplace and install the plugin
+/plugin marketplace add sirCamp/daedalus-ai
+/plugin install daedalus-ai@daedalus-ai
 ```
 
-### Scopes
+The plugin registers the MCP server, slash commands, agents, and skills automatically.
+
+### Option B — Manual setup
+
+```bash
+# 1. Install the package
+pip install -e .
+
+# 2. Register MCP server + install agents, commands, skills + auto-approve tools
+daedalus install-mcp
+
+# 3. Restart Claude Code
+```
+
+#### Scopes (manual setup only)
 
 | Scope | Flag | Where it writes | Use case |
 |-------|------|----------------|----------|
@@ -53,7 +70,10 @@ daedalus install-mcp --scope project
 Since it's installed in editable mode, Python code changes are immediate. But plugin files (commands, skills, agents) are copied to `~/.claude/`, so after updating:
 
 ```bash
-# Re-install plugin files + restart Claude Code
+# Marketplace install: update via Claude Code
+/plugin update daedalus-ai@daedalus-ai
+
+# Manual install: re-install plugin files + restart Claude Code
 daedalus install-mcp
 ```
 
@@ -67,10 +87,7 @@ cd my-research
 # 2. Edit daedalus.yaml — define your scripts, parameters, stack
 # 3. Edit program.md — define your research goals and metrics
 
-# 4. Register MCP (global, works from any project with daedalus.yaml)
-daedalus install-mcp
-
-# 5. Open Claude Code and start experimenting
+# 4. Open Claude Code and start experimenting
 #    Use /daedalus:experiment, /daedalus:research-status, or just ask in natural language
 ```
 

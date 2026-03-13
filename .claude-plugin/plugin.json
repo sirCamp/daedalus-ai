@@ -6,6 +6,7 @@
     "name": "Stefano Campese",
     "url": "https://github.com/sirCamp"
   },
+  "homepage": "https://github.com/sirCamp/daedalus-ai",
   "repository": "https://github.com/sirCamp/daedalus-ai",
   "license": "MIT",
   "keywords": [
@@ -16,6 +17,7 @@
     "ai-assistant",
     "mcp"
   ],
+  "category": "ml-research",
   "agents": [
     "./agents/research-assistant.md"
   ],
@@ -24,5 +26,11 @@
   ],
   "skills": [
     "./skills/"
-  ]
+  ],
+  "mcpServers": {
+    "daedalus": {
+      "command": "python",
+      "args": ["-u", "-m", "daedalus.mcp_server", "--project", "."]
+    }
+  }
 }
