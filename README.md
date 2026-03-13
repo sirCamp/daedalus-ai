@@ -26,10 +26,26 @@ Running ML experiments involves a repetitive loop: change a parameter, launch tr
 # Install the package
 pip install -e .
 
-# Register MCP server + install agents, commands, skills + auto-approve tools
-daedalus install-mcp --global
+# Register MCP server globally + install agents, commands, skills + auto-approve tools
+daedalus install-mcp
 
 # Restart Claude Code
+```
+
+### Scopes
+
+| Scope | Flag | Where it writes | Use case |
+|-------|------|----------------|----------|
+| `user` (default) | `--scope user` or omit | `~/.claude.json` | **Recommended**: available in ALL projects |
+| `project` | `--scope project` | `.mcp.json` in project dir | Shared via git, per-project |
+| `local` | `--scope local` | `~/.claude.json` (local entry) | This project only, not shared |
+
+```bash
+# Global install (recommended, default)
+daedalus install-mcp
+
+# Project-only install (creates .mcp.json, committable to git)
+daedalus install-mcp --scope project
 ```
 
 ### Updating
@@ -38,7 +54,7 @@ Since it's installed in editable mode, Python code changes are immediate. But pl
 
 ```bash
 # Re-install plugin files + restart Claude Code
-daedalus install-mcp --global
+daedalus install-mcp
 ```
 
 ## Quick Start
@@ -51,7 +67,7 @@ cd my-research
 # 2. Edit daedalus.yaml — define your scripts, parameters, stack
 # 3. Edit program.md — define your research goals and metrics
 
-# 4. Register MCP for this project
+# 4. Register MCP (global, works from any project with daedalus.yaml)
 daedalus install-mcp
 
 # 5. Open Claude Code and start experimenting
@@ -243,13 +259,13 @@ hosts:
 
 | Command | Description |
 |---------|-------------|
-| `daedalus install-mcp` | Register MCP server (project-level) |
-| `daedalus install-mcp --global` | Register MCP server + install plugin files (all projects) |
+| `daedalus install-mcp` | Register MCP server globally + install plugin files (default) |
+| `daedalus install-mcp --scope project` | Register MCP server for this project only (.mcp.json) |
 | `daedalus uninstall-mcp` | Remove MCP registration |
 
 ## MCP Tools
 
-When registered as an MCP server, Daedalus exposes 28 tools to Claude Code:
+When registered as an MCP server, Daedalus exposes 30 tools to Claude Code:
 
 ### Context & Analytics
 | Tool | Description |
@@ -298,22 +314,24 @@ When registered as an MCP server, Daedalus exposes 28 tools to Claude Code:
 | `daedalus_validate_dataset` | Format checks (18 formats supported) |
 | `daedalus_list_scripts` | Available scripts and parameters |
 
-### Batch & Human
+### Batch & Remote
 | Tool | Description |
 |------|-------------|
 | `daedalus_batch_run` | Launch multiple experiments across hosts (round-robin) |
+| `daedalus_remote_exec` | Execute a command on the remote SSH host (read-only direct, mutating needs confirmation) |
 | `daedalus_human_confirm` | Ask researcher for approval |
 
 ### Research Plan
 | Tool | Description |
 |------|-------------|
-| `daedalus_get_plan` | Get the current research plan with all steps and progress |
-| `daedalus_create_plan` | Create a multi-step plan (3-7 steps, priorities, dependencies) |
-| `daedalus_update_plan_step` | Mark steps done, change priority, add notes, link experiments |
+| `daedalus_get_plan` | Get the current research plan with all steps, autonomy mode, and guardrail status |
+| `daedalus_create_plan` | Create a plan with autonomy mode and guardrails (3-7 steps, priorities, dependencies) |
+| `daedalus_update_plan_step` | Mark steps done/failed, change priority, set requires_confirmation |
+| `daedalus_update_plan` | Switch autonomy mode, adjust guardrails, pause/resume the plan |
 
 ## Slash Commands
 
-After installing (`daedalus install-mcp --global` copies everything), these commands are available in Claude Code:
+After installing (`daedalus install-mcp` copies everything), these commands are available in Claude Code:
 
 | Command | Description |
 |---------|-------------|
@@ -370,9 +388,67 @@ Each plan step has:
 - **Expected outcome**: what we predict
 - **Priority**: 1 (highest) to 5
 - **Dependencies**: which steps must complete first
-- **Status**: pending → running → done/skipped
+- **Status**: pending → running → done/failed/skipped
+- **Requires confirmation**: override for risky steps (even in autonomous mode)
 
 The autonomous loop follows the plan: picks the next actionable step (highest priority with dependencies met), designs the experiment, runs it, reflects, marks it done, and moves to the next step. If all steps complete, the loop stops. The agent can also add new steps during reflection as results evolve.
+
+### Autonomy Modes
+
+Plans support two execution modes:
+
+| Mode | Behavior | Use case |
+|------|----------|----------|
+| `autonomous` (default) | Launches directly — Claude Code chat is already human-in-the-loop | Normal usage via MCP |
+| `supervised` | Adds explicit code-level confirmation gate before each launch | CLI `run_loop` or extra caution |
+
+```bash
+# Create an autonomous plan via MCP
+# (Claude Code tool call)
+create_plan(
+    goal="Find optimal learning rate",
+    steps=[...],
+    autonomy="autonomous",
+    max_experiments=10,
+    max_consecutive_failures=2,
+)
+
+# Switch mode mid-plan
+update_plan(autonomy="autonomous")  # "go overnight"
+update_plan(autonomy="supervised")  # "I'm back, let me review"
+```
+
+### Auto-Bookkeeping
+
+When experiments are linked to plan steps (via `plan_step_id` in `launch_experiment`), Daedalus automatically:
+
+- Links the experiment to the plan step on launch
+- Marks the step as done/failed when the experiment completes
+- Resets/increments failure counters
+- Copies reflection notes to the plan step
+
+No manual `update_plan_step` calls needed for these transitions.
+
+### Guardrails
+
+Safety rails prevent runaway execution in autonomous mode:
+
+| Guardrail | Default | Effect |
+|-----------|---------|--------|
+| `max_experiments` | unlimited | Auto-pause after N total experiments |
+| `max_consecutive_failures` | 2 | Auto-pause after N failures in a row |
+| Per-step `requires_confirmation` | false | Block launch even in autonomous mode |
+
+When a guardrail triggers, the plan is **paused** (not stopped). Resume with `update_plan(paused=false)`.
+
+### MCP Tools for Plan Management
+
+| Tool | Description |
+|------|-------------|
+| `daedalus_get_plan` | Full plan state: steps, autonomy mode, guardrail counters, next actionable |
+| `daedalus_create_plan` | Create plan with autonomy mode and guardrails |
+| `daedalus_update_plan_step` | Update step status, priority, notes, requires_confirmation |
+| `daedalus_update_plan` | Switch autonomy mode, adjust guardrails, pause/resume |
 
 ## Smart Context & Convergence
 
@@ -506,7 +582,7 @@ For SSH experiments, a sentinel script runs inside `screen` on the remote host:
 │  Server          │    │  (training scripts,      │
 │                  │    │   data, configs)          │
 │  - ToolExecutor  │    └──────────────────────────┘
-│  - 28 tools      │
+│  - 30 tools      │
 │  - Ledger (JSONL)│
 │  - Memory (JSONL)│
 │  - Runners       │
@@ -568,7 +644,7 @@ Demonstrates: plan mode, HuggingFace integration, learning rate search, reflecti
 # Install with dev dependencies
 pip install -e ".[dev]"
 
-# Run tests (418 tests)
+# Run tests (472 tests)
 python -m pytest tests/ -q
 
 # Run with coverage

@@ -14,10 +14,15 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import re
+import shlex
 import subprocess
 from importlib import resources
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 from pydantic import BaseModel
 
@@ -48,26 +53,33 @@ class SSHRunner:
     """Run experiments on a remote host via SSH.
 
     Uses plain ``ssh`` and ``scp`` commands (no paramiko dependency).
-    The training script must already exist on the remote, or be synced
-    via ``sync_files`` before launching.
+    Training scripts are auto-synced to the remote on first launch.
 
     Run ID format: ``ssh:{host}:{remote_dir}``
     This encodes everything needed for stateless cross-session recovery.
     """
 
-    def __init__(self, config: SSHConfig) -> None:
+    def __init__(self, config: SSHConfig, project_path: Path | None = None) -> None:
         self.config = config
+        self.project_path = project_path
 
     def _sshpass_prefix(self) -> list[str]:
-        """Build sshpass prefix for password auth."""
+        """Build sshpass prefix for password auth (uses env var, not CLI arg)."""
         if self.config.password:
-            return ["sshpass", "-p", self.config.password]
+            return ["sshpass", "-e"]
         return []
+
+    def _ssh_env(self) -> dict[str, str]:
+        """Build environment with SSHPASS if password auth is configured."""
+        env = os.environ.copy()
+        if self.config.password:
+            env["SSHPASS"] = self.config.password
+        return env
 
     def _ssh_base(self) -> list[str]:
         """Build base SSH command with options."""
         cmd = self._sshpass_prefix()
-        cmd.extend(["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10"])
+        cmd.extend(["ssh", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10"])
         if self.config.key_path:
             cmd.extend(["-i", str(self.config.key_path)])
         if self.config.port != 22:
@@ -78,7 +90,7 @@ class SSHRunner:
     def _scp_base(self) -> list[str]:
         """Build base SCP command."""
         cmd = self._sshpass_prefix()
-        cmd.extend(["scp", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10"])
+        cmd.extend(["scp", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10"])
         if self.config.key_path:
             cmd.extend(["-i", str(self.config.key_path)])
         if self.config.port != 22:
@@ -88,7 +100,10 @@ class SSHRunner:
     def _run_ssh(self, remote_cmd: str, timeout: float = 30) -> subprocess.CompletedProcess:
         """Execute a command on the remote host."""
         cmd = self._ssh_base() + [remote_cmd]
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout,
+            env=self._ssh_env(),
+        )
 
     def _encode_run_id(self, remote_dir: str) -> str:
         """Encode host + remote_dir as stateless run_id."""
@@ -112,7 +127,10 @@ class SSHRunner:
         remote_path = f"{self.config.user}@{self.config.host}:{remote_dir}"
         self._run_ssh(f"mkdir -p {remote_dir}")
         cmd = self._scp_base() + ["-r", str(local_dir) + "/.", remote_path]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=120,
+            env=self._ssh_env(),
+        )
         if result.returncode != 0:
             raise RuntimeError(f"SCP sync failed: {result.stderr}")
 
@@ -121,20 +139,76 @@ class SSHRunner:
         sentinel_src = Path(__file__).parent / "sentinel.sh"
         remote_path = f"{self.config.user}@{self.config.host}:{remote_dir}/sentinel.sh"
         cmd = self._scp_base() + [str(sentinel_src), remote_path]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=30,
+            env=self._ssh_env(),
+        )
         if result.returncode != 0:
             raise RuntimeError(f"Failed to deploy sentinel: {result.stderr}")
         self._run_ssh(f"chmod +x {remote_dir}/sentinel.sh")
 
+    def sync_project(self, project_path: Path) -> None:
+        """Sync project scripts and config to remote_work_dir.
+
+        Collects scripts registered in daedalus.yaml, requirements file,
+        and the config itself, then syncs them to the remote project root.
+        This ensures training scripts are available on the remote host.
+        """
+        import shutil
+        import tempfile
+
+        config_file = project_path / "daedalus.yaml"
+        if not config_file.exists():
+            return
+
+        config = yaml.safe_load(config_file.read_text()) or {}
+        sync_items: list[str] = []
+
+        # Scripts from registry
+        for _name, spec in config.get("scripts", {}).items():
+            script_path = spec.get("path", "")
+            if script_path and (project_path / script_path).exists():
+                sync_items.append(script_path)
+
+        # Requirements file
+        stack = config.get("stack", {})
+        req_file = stack.get("requirements", "requirements.txt")
+        if (project_path / req_file).exists():
+            sync_items.append(req_file)
+
+        # Config itself
+        sync_items.append("daedalus.yaml")
+
+        if not sync_items:
+            return
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            for item in sync_items:
+                src = project_path / item
+                dst = tmp_path / item
+                if src.is_dir():
+                    shutil.copytree(src, dst)
+                elif src.exists():
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src, dst)
+
+            logger.info(
+                "Auto-syncing project files to %s:%s (%s)",
+                self.config.host, self.config.remote_work_dir, sync_items,
+            )
+            self.sync_files(tmp_path, self.config.remote_work_dir)
+
     def launch(self, experiment: Experiment, work_dir: Path) -> str:
         """Launch the experiment on the remote host.
 
+        Auto-syncs project scripts to the remote before launching.
         Deploys the sentinel script and starts both the training process
         and the sentinel inside a screen session.
 
         Args:
             experiment: The experiment to run.
-            work_dir: Local work directory (used for config sync).
+            work_dir: Local work directory (for logs/results).
 
         Returns:
             Stateless run_id: ``ssh:{host}:{remote_dir}``.
@@ -143,6 +217,10 @@ class SSHRunner:
 
         # Create remote directory
         self._run_ssh(f"mkdir -p {remote_dir}/logs")
+
+        # Auto-sync project scripts to remote_work_dir (project root on remote)
+        if self.project_path:
+            self.sync_project(self.project_path)
 
         # Write config to remote
         config_json = experiment.config.model_dump_json()
@@ -153,14 +231,25 @@ class SSHRunner:
         # Deploy sentinel
         self._deploy_sentinel(remote_dir)
 
-        # Build training command using launcher helper
-        cmd_parts = build_launch_cmd(experiment.config, python=self.config.python_path)
-        train_cmd = " ".join(str(p) for p in cmd_parts)
+        # Resolve relative script paths against remote_work_dir
+        config = experiment.config
+        if not config.script.startswith("/"):
+            config = config.model_copy(
+                update={"script": f"{self.config.remote_work_dir}/{config.script}"}
+            )
+
+        # Build training command using launcher helper (shell-escaped)
+        cmd_parts = build_launch_cmd(config, python=self.config.python_path)
+        train_cmd = " ".join(shlex.quote(str(p)) for p in cmd_parts)
         env_vars = build_env_vars(experiment.config)
-        env_str = " ".join(f"{k}={v}" for k, v in env_vars.items())
+        for k in env_vars:
+            if not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', k):
+                raise ValueError(f"Invalid environment variable name: {k}")
+        env_str = " ".join(f"{k}={shlex.quote(str(v))}" for k, v in env_vars.items())
 
         # Launch training process via a launcher script to avoid SSH
         # hanging on file descriptor close. Write a script, then execute it.
+        # cd to remote_dir (experiment directory) — script paths are already absolute.
         launcher_script = (
             f"#!/bin/bash\n"
             f"cd {remote_dir}\n"

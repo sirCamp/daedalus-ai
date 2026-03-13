@@ -1,21 +1,15 @@
 """Daedalus MCP server — exposes tools to Claude Code.
 
 Usage:
-    python -m daedalus.mcp_server --project /path/to/project
+    python -u -m daedalus.mcp_server --project /path/to/project
 
-Register globally in ~/.claude/settings.json:
-    {
-        "mcpServers": {
-            "daedalus": {
-                "command": "python",
-                "args": ["-m", "daedalus.mcp_server", "--project", "."]
-            }
-        }
-    }
+Register globally (recommended):
+    daedalus install-mcp
 
-The server auto-discovers the project root by searching for daedalus.yaml
-starting from --project and walking up. If no project is found, it creates
-a minimal structure in the current directory on first tool call.
+Or manually:
+    claude mcp add -s user daedalus -- python -u -m daedalus.mcp_server --project .
+
+Uses the official MCP Python SDK (mcp>=1.0) for protocol handling.
 """
 
 from __future__ import annotations
@@ -39,164 +33,65 @@ def _find_project_root(start: Path) -> Path | None:
 
 
 def _ensure_project(path: Path) -> Path | None:
-    """Find a valid Daedalus project starting from path.
-
-    Searches for daedalus.yaml by walking up from path.
-    Returns None if no project is found (caller should handle gracefully).
-    """
+    """Find a valid Daedalus project starting from path."""
     found = _find_project_root(path)
     if found:
-        logger.info(f"Found project at: {found}")
+        logger.info("Found project at: %s", found)
         return found
 
     logger.warning(
-        f"No daedalus.yaml found starting from {path}. "
-        "Run 'daedalus init <name>' to create a project."
+        "No daedalus.yaml found starting from %s. "
+        "Run 'daedalus init <name>' to create a project.",
+        path,
     )
     return None
 
 
-def _build_json_schema(tool_schema: dict) -> dict:
-    """Convert Anthropic tool schema to MCP/JSON-RPC tool schema."""
-    return {
-        "name": f"daedalus_{tool_schema['name']}",
-        "description": tool_schema["description"],
-        "inputSchema": tool_schema["input_schema"],
-    }
+def _build_mcp_server(project_path: Path | None):
+    """Build and return an MCP server with all Daedalus tools registered.
 
-
-def _handle_request(request: dict, executor) -> dict:
-    """Handle a JSON-RPC request.
-
-    If executor is None (no project found), tools/list returns an empty list
-    and tools/call returns a helpful error message.
+    Uses the low-level ``mcp.server.Server`` class so that pre-defined
+    JSON schemas from ``TOOL_SCHEMAS`` are forwarded verbatim to the
+    MCP protocol (FastMCP infers schemas from function signatures, which
+    doesn't work for our ``**kwargs`` handlers).
     """
-    method = request.get("method", "")
-    req_id = request.get("id")
-    params = request.get("params", {})
+    from mcp.server import Server
+    from mcp.types import TextContent, Tool
 
-    if method == "initialize":
-        return {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "result": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {
-                    "tools": {},
-                },
-                "serverInfo": {
-                    "name": "daedalus",
-                    "version": "0.1.0",
-                },
-            },
-        }
+    from .agent.tools import TOOL_SCHEMAS
 
-    if method == "notifications/initialized":
-        # No response needed for notifications
-        return None  # type: ignore
+    executor = None
+    if project_path is not None:
+        from .agent.tools import ToolExecutor
+        executor = ToolExecutor(project_path)
 
-    if method == "tools/list":
-        from .agent.tools import TOOL_SCHEMAS
-        # Always list tools even if no project — so Claude Code sees them
-        tools = [_build_json_schema(s) for s in TOOL_SCHEMAS]
-        return {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "result": {"tools": tools},
-        }
+    server = Server("daedalus")
 
-    if method == "tools/call":
-        tool_name = params.get("name", "")
-        arguments = params.get("arguments", {})
+    @server.list_tools()
+    async def list_tools() -> list[Tool]:
+        return [
+            Tool(
+                name=f"daedalus_{schema['name']}",
+                description=schema["description"],
+                inputSchema=schema["input_schema"],
+            )
+            for schema in TOOL_SCHEMAS
+        ]
 
-        # Strip daedalus_ prefix
-        if tool_name.startswith("daedalus_"):
-            tool_name = tool_name[9:]
-
+    @server.call_tool()
+    async def call_tool(name: str, arguments: dict) -> list[TextContent]:
+        tool_name = name.removeprefix("daedalus_")
         if executor is None:
-            result_str = (
+            text = (
                 "ERROR: No Daedalus project found. "
                 "No daedalus.yaml was found in the current directory or any parent. "
                 "Run 'daedalus init <name>' to create a project, then restart Claude Code."
             )
         else:
-            result_str = executor.execute(tool_name, arguments)
+            text = executor.execute(tool_name, arguments or {})
+        return [TextContent(type="text", text=text)]
 
-        return {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "result": {
-                "content": [
-                    {"type": "text", "text": result_str},
-                ],
-            },
-        }
-
-    # Unknown method
-    return {
-        "jsonrpc": "2.0",
-        "id": req_id,
-        "error": {
-            "code": -32601,
-            "message": f"Method not found: {method}",
-        },
-    }
-
-
-def run_server(project_path: Path | None) -> None:
-    """Run the MCP server on stdio."""
-    if project_path is not None:
-        from .agent.tools import ToolExecutor
-        executor = ToolExecutor(project_path)
-        logger.info(f"Daedalus MCP server started for project: {project_path}")
-    else:
-        executor = None
-        logger.warning("Daedalus MCP server started WITHOUT a project (tools will return errors)")
-
-    # Read JSON-RPC messages from stdin, write responses to stdout.
-    # IMPORTANT: Use readline() in a loop, NOT `for line in sys.stdin:`.
-    # The iterator uses a read-ahead buffer that conflicts with read(N)
-    # for Content-Length framed messages, causing lost/corrupted data.
-    while True:
-        line = sys.stdin.readline()
-        if not line:
-            break  # EOF
-        line = line.strip()
-        if not line:
-            continue
-
-        try:
-            request = json.loads(line)
-        except json.JSONDecodeError:
-            # Content-Length header based protocol (MCP standard)
-            if line.startswith("Content-Length:"):
-                length = int(line.split(":", 1)[1].strip())
-                # Skip header lines until empty line
-                while True:
-                    header_line = sys.stdin.readline().strip()
-                    if not header_line:
-                        break
-                # Read body
-                body = sys.stdin.read(length)
-                try:
-                    request = json.loads(body)
-                except json.JSONDecodeError:
-                    logger.warning(f"Failed to parse body: {body[:200]}")
-                    continue
-            else:
-                logger.warning(f"Unparseable input: {line[:200]}")
-                continue
-
-        response = _handle_request(request, executor)
-
-        if response is not None:
-            response_bytes = json.dumps(response).encode("utf-8")
-            # Write using Content-Length framing (MCP standard)
-            sys.stdout.buffer.write(
-                f"Content-Length: {len(response_bytes)}\r\n\r\n".encode("utf-8")
-            )
-            sys.stdout.buffer.write(response_bytes)
-            sys.stdout.buffer.flush()
+    return server
 
 
 def main() -> None:
@@ -218,15 +113,30 @@ def main() -> None:
     logging.basicConfig(
         level=getattr(logging, args.log_level),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        stream=sys.stderr,  # MCP uses stderr for logs
+        stream=sys.stderr,
     )
 
     start_path = Path(args.project).resolve()
-    logger.info(f"MCP server starting, cwd={Path.cwd()}, --project={start_path}")
+    logger.info("MCP server starting, cwd=%s, --project=%s", Path.cwd(), start_path)
     project_path = _ensure_project(start_path)
     if project_path:
-        logger.info(f"Using project: {project_path}")
-    run_server(project_path)
+        logger.info("Using project: %s", project_path)
+
+    server = _build_mcp_server(project_path)
+
+    # Run with stdio transport (MCP SDK handles Content-Length framing)
+    import asyncio
+    from mcp.server.stdio import stdio_server
+
+    async def _run() -> None:
+        async with stdio_server() as (read_stream, write_stream):
+            await server.run(
+                read_stream,
+                write_stream,
+                server.create_initialization_options(),
+            )
+
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":

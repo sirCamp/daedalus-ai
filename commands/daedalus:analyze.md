@@ -28,8 +28,8 @@ Agent: [calls daedalus_list_experiments(status="completed")]
        Found 2 unanalyzed experiments: exp_004, exp_005.
 
        exp_004 vs baseline exp_003:
-       - eval.acc: 0.92 → 0.94 (+2.2%) ✓
-       - eval.loss: 0.31 → 0.28 (-9.7%) ✓
+       - eval.acc: 0.92 → 0.94 (+2.2%)
+       - eval.loss: 0.31 → 0.28 (-9.7%)
        Hypothesis CONFIRMED: higher LR improved convergence.
 
        Next suggestion: try LR warmup to stabilize early training.

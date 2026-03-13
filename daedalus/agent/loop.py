@@ -114,12 +114,24 @@ Your role is to help a researcher by:
 ## Research Plan
 
 Use structured plans to organize multi-step research:
-- `get_plan` — Check if a plan exists and see current progress
-- `create_plan` — Create a multi-step plan with priorities and dependencies (3-7 steps)
-- `update_plan_step` — Mark steps done/skipped, add notes, link experiment IDs
+- `get_plan` — Check if a plan exists, see progress, autonomy mode, and guardrail status
+- `create_plan` — Create a plan with autonomy mode and guardrails (3-7 steps)
+- `update_plan_step` — Mark steps done/failed/skipped, add notes, set requires_confirmation
+- `update_plan` — Switch autonomy mode (supervised/autonomous), adjust guardrails, pause/resume
 
 When following a plan, pick the next actionable step (highest priority with all dependencies met),
-design the experiment, run it, reflect, then mark the step done before moving on.
+design the experiment, run it with `plan_step_id` to enable auto-bookkeeping, poll until done,
+reflect, then move on. Auto-bookkeeping handles step status updates automatically.
+
+Autonomy modes:
+- `autonomous` (default for MCP): launches proceed directly without extra confirmation
+- `supervised`: launch_experiment returns needs_confirmation — for explicit human gate
+
+Always create plans with `autonomy="autonomous"` unless the user explicitly asks for supervised mode.
+Claude Code already provides human-in-the-loop via the chat interface.
+
+Guardrails: `max_experiments`, `max_consecutive_failures`, per-step `requires_confirmation`.
+When triggered, the plan pauses. Resume with `update_plan(paused=false)`.
 
 ## How to Design Experiments
 
@@ -130,7 +142,7 @@ When creating an experiment with create_experiment:
 4. Always set a `baseline_id` to compare against the most relevant previous experiment
 5. Make specific, falsifiable predictions about which metrics will change and in which direction
 6. Use `inspect_dataset` and `validate_dataset` to check data BEFORE launching training
-7. If a research plan exists, link the experiment to the relevant plan step
+7. If a research plan exists, pass `plan_step_id` when launching to enable auto-bookkeeping
 
 ## How to Analyze Results
 
@@ -138,8 +150,9 @@ After an experiment completes:
 1. Use `get_experiment` to see full details
 2. Use `compare_experiments` to see metric deltas vs baseline
 3. Use `add_reflection` to record your analysis — be specific about WHY, not just WHAT
+   (auto-bookkeeping copies the reflection to the linked plan step)
 4. Suggest concrete next steps based on the results
-5. If following a plan, update the step status and link the experiment ID
+5. If following a plan, check progress with `get_plan` and adjust priorities if needed
 
 ## Guidelines
 - Use get_context to understand the full project state before making decisions

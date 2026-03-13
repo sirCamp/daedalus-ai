@@ -175,6 +175,41 @@ def init(name: str, path: str) -> None:
         "  #   ...\n"
     )
 
+    # CLAUDE.md — tells Claude Code to use Daedalus MCP tools
+    claude_md = project_dir / "CLAUDE.md"
+    if not claude_md.exists():
+        claude_md.write_text(
+            "# Daedalus Research Project\n\n"
+            "This project uses **Daedalus** for experiment management. "
+            "All experiment lifecycle operations MUST go through Daedalus MCP tools.\n\n"
+            "## Rules\n\n"
+            "- Use `daedalus_*` MCP tools for ALL experiment operations "
+            "(create, launch, poll, reflect, compare, logs)\n"
+            "- Use `daedalus_*` MCP tools for research memory "
+            "(save_note, read_notes, update_program)\n"
+            "- Use `daedalus_*` MCP tools for literature "
+            "(search_papers, add_paper, literature_review)\n"
+            "- Use `daedalus_*` MCP tools for the research plan "
+            "(get_plan, create_plan, update_plan, update_plan_step)\n"
+            "- Use `daedalus_remote_exec` to debug remote environments "
+            "(GPU status, packages, disk space)\n"
+            "- Do NOT read or write files in `ledger/` directly — "
+            "they are managed by Daedalus\n"
+            "- Do NOT import from `daedalus.*` in Bash — use the MCP tools\n"
+            "- Use Claude Code tools (Read, Edit, Bash) ONLY for the training code, "
+            "data files, and shell commands on the user's codebase\n\n"
+            "## Workflow\n\n"
+            "1. Read research memory: `daedalus_read_notes`\n"
+            "2. Get context: `daedalus_get_context(mode=\"full\")`\n"
+            "3. Check plan: `daedalus_get_plan`\n"
+            "4. Follow the plan or ask the user what to do next\n\n"
+            "## Key Files\n\n"
+            "- `program.md` — research goals and metrics\n"
+            "- `daedalus.yaml` — project config (runner, scripts, stack)\n"
+            "- `runner_config.yaml` — SSH host configuration\n"
+            "- `ledger/` — experiment data (managed by Daedalus, do not edit)\n"
+        )
+
     console.print(f"[green]Project '{name}' initialized at {project_dir}[/green]")
     console.print(f"  Edit [bold]{project_dir}/program.md[/bold] to define your research goals.")
     console.print(f"  Edit [bold]{project_dir}/runner_config.yaml[/bold] to configure your runner.")
@@ -1695,83 +1730,123 @@ def _print_watch_result(result: dict) -> None:
 # ---------------------------------------------------------------------------
 
 @cli.command("install-mcp")
-@click.option("--global", "global_", is_flag=True,
-              help="Install globally in ~/.claude/settings.json (default: project-level)")
+@click.option("--scope", "scope", type=click.Choice(["user", "project", "local"]),
+              default="user",
+              help="MCP scope: user (global), project (.mcp.json), local (this project only)")
 @click.option("--python", "python_path", default=None,
               help="Python executable path (default: current interpreter)")
 @click.pass_context
-def install_mcp(ctx: click.Context, global_: bool, python_path: str | None) -> None:
-    """Register Daedalus as a Claude Code MCP server."""
+def install_mcp(ctx: click.Context, scope: str, python_path: str | None) -> None:
+    """Register Daedalus as a Claude Code MCP server.
+
+    Uses `claude mcp add` under the hood (the official way to register servers).
+
+    Scopes:\n
+      user    — available in ALL projects (default, recommended)\n
+      project — shared via .mcp.json (committed to git)\n
+      local   — this project only (stored in ~/.claude.json)
+    """
+    import shutil
+    import subprocess
     import sys as _sys
 
     python_bin = python_path or _sys.executable
 
-    if global_:
-        # Global: use "." so the server discovers the project from Claude Code's
-        # workspace cwd (which changes per project). No fixed path.
-        project_arg = "."
-        settings_dir = Path.home() / ".claude"
-        settings_file = settings_dir / "settings.json"
-        scope = "global"
-    else:
-        # Project-level: use absolute path to this specific project
-        project = _find_project(ctx)
-        project_arg = str(project.resolve())
-        settings_dir = project / ".claude"
-        settings_file = settings_dir / "settings.json"
-        scope = "project"
+    # Check that `claude` CLI is available
+    claude_bin = shutil.which("claude")
+    if claude_bin is None:
+        console.print("[red]Error: 'claude' CLI not found in PATH.[/red]")
+        console.print("Install Claude Code first: https://docs.anthropic.com/en/docs/claude-code")
+        raise SystemExit(1)
 
-    # Read existing settings
+    console.print("\n[bold]Installing Daedalus MCP server...[/bold]\n")
+
+    # --- Step 1: Register MCP server via `claude mcp add` ---
+    # Remove existing registration (ignore errors if not found)
+    subprocess.run(
+        [claude_bin, "mcp", "remove", "-s", scope, "daedalus"],
+        capture_output=True,
+    )
+
+    cmd = [
+        claude_bin, "mcp", "add",
+        "-s", scope,
+        "daedalus",
+        "--",
+        python_bin, "-u", "-m", "daedalus.mcp_server", "--project", ".",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+
+    if result.returncode != 0:
+        console.print(f"[red]Error registering MCP server:[/red] {result.stderr.strip()}")
+        raise SystemExit(1)
+
+    console.print(f"  [green]✓[/green] MCP server registered (scope={scope})")
+    console.print(f"    Python: {python_bin}")
+
+    # --- Step 2: Install plugin files (agents, commands, skills) ---
+    if scope == "project":
+        project = _find_project(ctx)
+        plugin_dir = project / ".claude"
+    else:
+        plugin_dir = Path.home() / ".claude"
+    _install_plugin_files(plugin_dir)
+
+    # --- Step 3: Auto-approve daedalus MCP tools ---
+    settings_file = Path.home() / ".claude" / "settings.json"
     settings: dict = {}
     if settings_file.exists():
         try:
             settings = json.loads(settings_file.read_text())
         except json.JSONDecodeError:
             settings = {}
-
-    # Add MCP server config
-    if "mcpServers" not in settings:
-        settings["mcpServers"] = {}
-
-    settings["mcpServers"]["daedalus"] = {
-        "command": python_bin,
-        "args": ["-m", "daedalus.mcp_server", "--project", project_arg],
-    }
-
-    # Write settings
-    settings_dir.mkdir(parents=True, exist_ok=True)
-    settings_file.write_text(json.dumps(settings, indent=2) + "\n")
-
-    # Also install plugin files (agents, commands, skills)
-    _install_plugin_files(settings_dir)
-
-    # Auto-approve daedalus MCP tools
     if "permissions" not in settings:
         settings["permissions"] = {}
     allow = settings["permissions"].setdefault("allow", [])
     if "mcp__daedalus__*" not in allow:
         allow.append("mcp__daedalus__*")
-        settings_file.write_text(json.dumps(settings, indent=2) + "\n")
-
-    console.print(f"\n[bold green]Daedalus installed ({scope})![/bold green]")
-    console.print(f"  Settings:  {settings_file}")
-    console.print(f"  Python:    {python_bin}")
-    if global_:
-        console.print("  Project:   auto-detect from workspace (daedalus.yaml)")
+        # Atomic write: temp file + rename to avoid corruption
+        import tempfile
+        import os
+        tmp_fd, tmp_path = tempfile.mkstemp(
+            dir=settings_file.parent, suffix=".tmp"
+        )
+        try:
+            with os.fdopen(tmp_fd, "w") as f:
+                json.dump(settings, f, indent=2)
+                f.write("\n")
+            os.replace(tmp_path, settings_file)
+        except Exception:
+            os.unlink(tmp_path)
+            raise
+        console.print("  [green]✓[/green] Auto-approved mcp__daedalus__* tools")
     else:
-        console.print(f"  Project:   {project_arg}")
-    console.print(f"  Agents:    {settings_dir / 'agents'}")
-    console.print(f"  Commands:  {settings_dir / 'commands'}")
-    console.print(f"  Skills:    {settings_dir / 'skills'}")
-    console.print("\n[dim]Restart Claude Code to activate.[/dim]")
+        console.print("  [green]✓[/green] Tools already approved")
+
+    console.print(f"\n[bold green]Done![/bold green]")
+    console.print("\n[dim]Restart Claude Code to activate the tools.[/dim]")
 
 
 def _install_plugin_files(target_dir: Path) -> None:
-    """Copy agents, commands, and skills to the target .claude directory."""
+    """Copy agents, commands, and skills to the target .claude directory.
+
+    - Copies all .md files from agents/ and commands/
+    - Copies all skill directories (containing SKILL.md) from skills/
+    - Cleans up old non-namespaced command files replaced by daedalus:* versions
+    """
     import shutil
 
     # Find the package's plugin files (relative to this file)
     package_root = Path(__file__).resolve().parent.parent
+
+    # Old command names (before daedalus: prefix) — clean up
+    _OLD_COMMANDS = {
+        "analyze.md", "batch-run.md", "compare.md", "experiment.md",
+        "inspect-data.md", "literature-review.md", "logs.md", "plan.md",
+        "research-status.md", "watch.md",
+    }
+
+    installed: dict[str, list[str]] = {"agents": [], "commands": [], "skills": []}
 
     for subdir in ("agents", "commands", "skills"):
         src = package_root / subdir
@@ -1781,6 +1856,13 @@ def _install_plugin_files(target_dir: Path) -> None:
         dst = target_dir / subdir
         dst.mkdir(parents=True, exist_ok=True)
 
+        if subdir == "commands":
+            # Remove old non-namespaced commands
+            for old_name in _OLD_COMMANDS:
+                old_file = dst / old_name
+                if old_file.exists():
+                    old_file.unlink()
+
         if subdir == "skills":
             # Skills are directories containing SKILL.md
             for skill_dir in src.iterdir():
@@ -1788,13 +1870,20 @@ def _install_plugin_files(target_dir: Path) -> None:
                     dst_skill = dst / skill_dir.name
                     dst_skill.mkdir(parents=True, exist_ok=True)
                     for f in skill_dir.iterdir():
-                        shutil.copy2(f, dst_skill / f.name)
+                        if f.is_file():
+                            shutil.copy2(f, dst_skill / f.name)
+                    installed["skills"].append(skill_dir.name)
         else:
             # Agents and commands are .md files
             for f in src.glob("*.md"):
                 shutil.copy2(f, dst / f.name)
+                installed[subdir].append(f.name)
 
-    console.print("  [green]✓[/green] Plugin files installed (agents, commands, skills)")
+    console.print(f"  [green]✓[/green] Agents:   {', '.join(installed['agents']) or 'none'}")
+    console.print(f"  [green]✓[/green] Commands: {len(installed['commands'])} installed")
+    for cmd in sorted(installed["commands"]):
+        console.print(f"             {cmd.replace('.md', '')}")
+    console.print(f"  [green]✓[/green] Skills:   {', '.join(installed['skills']) or 'none'}")
 
 
 # ---------------------------------------------------------------------------
@@ -1802,38 +1891,32 @@ def _install_plugin_files(target_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 @cli.command("uninstall-mcp")
-@click.option("--global", "global_", is_flag=True,
-              help="Remove from global ~/.claude/settings.json")
-@click.pass_context
-def uninstall_mcp(ctx: click.Context, global_: bool) -> None:
-    """Remove Daedalus MCP server from Claude Code settings."""
-    project = _find_project(ctx)
+@click.option("--scope", "scope", type=click.Choice(["user", "project", "local"]),
+              default="user",
+              help="MCP scope to remove from (default: user)")
+def uninstall_mcp(scope: str) -> None:
+    """Remove Daedalus MCP server from Claude Code."""
+    import shutil
+    import subprocess
 
-    if global_:
-        settings_file = Path.home() / ".claude" / "settings.json"
-    else:
-        settings_file = project / ".claude" / "settings.json"
+    claude_bin = shutil.which("claude")
+    if claude_bin is None:
+        console.print("[red]Error: 'claude' CLI not found in PATH.[/red]")
+        raise SystemExit(1)
 
-    if not settings_file.exists():
-        console.print("[yellow]No settings file found.[/yellow]")
+    result = subprocess.run(
+        [claude_bin, "mcp", "remove", "-s", scope, "daedalus"],
+        capture_output=True, text=True,
+    )
+
+    if result.returncode != 0:
+        stderr = result.stderr.strip()
+        if "not found" in stderr.lower() or "not registered" in stderr.lower():
+            console.print("[yellow]Daedalus MCP server not registered.[/yellow]")
+        else:
+            console.print(f"[red]Error:[/red] {stderr}")
         return
 
-    try:
-        settings = json.loads(settings_file.read_text())
-    except json.JSONDecodeError:
-        console.print("[red]Invalid settings.json[/red]")
-        return
-
-    servers = settings.get("mcpServers", {})
-    if "daedalus" not in servers:
-        console.print("[yellow]Daedalus MCP server not registered.[/yellow]")
-        return
-
-    del servers["daedalus"]
-    if not servers:
-        del settings["mcpServers"]
-
-    settings_file.write_text(json.dumps(settings, indent=2) + "\n")
     console.print("[bold green]Daedalus MCP server removed.[/bold green]")
     console.print("\n[dim]Restart Claude Code to apply.[/dim]")
 

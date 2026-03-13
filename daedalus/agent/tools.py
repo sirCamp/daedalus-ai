@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -127,12 +128,13 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     },
     {
         "name": "launch_experiment",
-        "description": "Launch a draft experiment. Transitions it to running and starts the training process.",
+        "description": "Launch a draft experiment. Auto-syncs files to remote for SSH runners. Returns monitoring hints (poll interval, suggested tasks while waiting). If a plan exists and is paused or guardrails are exceeded, the launch is blocked.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "exp_id": {"type": "string", "description": "Experiment ID to launch."},
                 "host": {"type": "string", "description": "Target host name for multi-host SSH. Omit to use default."},
+                "plan_step_id": {"type": "string", "description": "Plan step ID to link this experiment to. Enables auto-bookkeeping."},
             },
             "required": ["exp_id"],
         },
@@ -532,6 +534,53 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "required": ["exp_ids"],
         },
     },
+    # --- Remote ---
+    {
+        "name": "remote_exec",
+        "description": (
+            "Execute a shell command on the remote SSH host. "
+            "Use ONLY for operations that have NO dedicated tool: nvidia-smi, disk space, "
+            "pip list, environment checks, process inspection, etc. "
+            "Do NOT use for experiment status (use poll_experiment) or training logs "
+            "(use get_experiment_logs). "
+            "Read-only commands run directly. Mutating commands (pip install, kill, rm) "
+            "use a two-step flow: (1) call with mutating=true — returns needs_confirmation; "
+            "(2) after user approves, call again with mutating=true AND confirmed=true."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "Shell command to execute on the remote host.",
+                },
+                "host": {
+                    "type": "string",
+                    "description": "Target host name. Omit to use default.",
+                },
+                "mutating": {
+                    "type": "boolean",
+                    "description": (
+                        "Set true if the command modifies state (pip install, kill, rm, apt, etc.). "
+                        "Mutating commands require confirmed=true after human approval."
+                    ),
+                },
+                "confirmed": {
+                    "type": "boolean",
+                    "description": (
+                        "Set true ONLY on the second call, after showing the "
+                        "needs_confirmation response to the human and getting approval. "
+                        "NEVER set confirmed=true on the first call."
+                    ),
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": "Timeout in seconds (default: 30, max: 600). Use 120-600 for pip install.",
+                },
+            },
+            "required": ["command"],
+        },
+    },
     # --- Plan ---
     {
         "name": "get_plan",
@@ -574,10 +623,27 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                                 "description": "Step IDs (e.g. 'S01') that must complete first.",
                             },
                             "tags": {"type": "array", "items": {"type": "string"}},
+                            "requires_confirmation": {
+                                "type": "boolean",
+                                "description": "If true, require human confirm even in autonomous mode (for risky/expensive steps).",
+                            },
                         },
                         "required": ["description", "rationale", "expected_outcome"],
                     },
                     "description": "List of plan steps (3-7 recommended).",
+                },
+                "autonomy": {
+                    "type": "string",
+                    "enum": ["supervised", "autonomous"],
+                    "description": "Launch mode. 'autonomous' launches directly (default). 'supervised' adds explicit confirmation gate before each launch.",
+                },
+                "max_experiments": {
+                    "type": "integer",
+                    "description": "Auto-pause after this many experiments. Omit for unlimited.",
+                },
+                "max_consecutive_failures": {
+                    "type": "integer",
+                    "description": "Auto-pause after N consecutive failures (default: 2).",
                 },
             },
             "required": ["goal", "steps"],
@@ -598,13 +664,51 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 },
                 "status": {
                     "type": "string",
-                    "enum": ["pending", "running", "done", "skipped", "blocked"],
+                    "enum": ["pending", "running", "done", "failed", "skipped", "blocked"],
                 },
                 "priority": {"type": "integer", "minimum": 1, "maximum": 5},
                 "experiment_id": {"type": "string"},
                 "notes": {"type": "string"},
+                "requires_confirmation": {
+                    "type": "boolean",
+                    "description": "If true, require human confirm even in autonomous mode.",
+                },
             },
             "required": ["step_id"],
+        },
+    },
+    {
+        "name": "update_plan",
+        "description": (
+            "Update plan-level settings: switch between supervised/autonomous mode, "
+            "adjust guardrails, or pause/resume the plan."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "autonomy": {
+                    "type": "string",
+                    "enum": ["supervised", "autonomous"],
+                    "description": "Launch mode. 'autonomous' for overnight runs.",
+                },
+                "max_experiments": {
+                    "type": "integer",
+                    "description": "Auto-pause after this many experiments.",
+                },
+                "max_consecutive_failures": {
+                    "type": "integer",
+                    "description": "Auto-pause after N consecutive failures.",
+                },
+                "paused": {
+                    "type": "boolean",
+                    "description": "Set true to pause, false to resume.",
+                },
+                "pause_reason": {
+                    "type": "string",
+                    "description": "Reason for pausing (when paused=true).",
+                },
+            },
+            "required": [],
         },
     },
 ]
@@ -637,8 +741,8 @@ class ToolExecutor:
             result = handler(**tool_input)
             return json.dumps(result, default=str)
         except Exception as e:
-            logger.error(f"Tool {tool_name} failed: {e}")
-            return json.dumps({"error": str(e)})
+            logger.exception("Tool %s failed", tool_name)
+            return json.dumps({"error": f"Tool '{tool_name}' failed: {e}"})
 
     def _tool_get_context(self, mode: str = "full", recent_n: int = 10) -> dict:
         from .context import ContextBuilder
@@ -670,6 +774,31 @@ class ToolExecutor:
             return {"error": f"Experiment {exp_id} not found"}
         return {"experiment": json.loads(exp.model_dump_json())}
 
+    def _resolve_script_path(self, name: str) -> str:
+        """Resolve a script name to its path using the scripts registry.
+
+        If ``name`` matches a registered script name (e.g. "train"),
+        returns the registered path (e.g. "train.py"). If not found
+        in the registry, returns the name as-is (assumed to be a path).
+        """
+        import yaml
+        from ..core.scripts_registry import ScriptsRegistry
+
+        config_file = self.project_path / "daedalus.yaml"
+        if not config_file.exists():
+            return name
+
+        config = yaml.safe_load(config_file.read_text()) or {}
+        scripts_config = config.get("scripts", {})
+        if not scripts_config:
+            return name
+
+        registry = ScriptsRegistry(scripts_config)
+        spec = registry.get(name)
+        if spec and spec.path:
+            return spec.path
+        return name
+
     def _tool_create_experiment(
         self,
         hypothesis_statement: str,
@@ -685,6 +814,11 @@ class ToolExecutor:
         baseline_id: str | None = None,
         tags: list[str] | None = None,
     ) -> dict:
+        # Resolve script names (e.g. "train") to paths (e.g. "train.py")
+        script = self._resolve_script_path(script)
+        if eval_script:
+            eval_script = self._resolve_script_path(eval_script)
+
         preds = [
             Prediction(
                 metric=p["metric"],
@@ -727,7 +861,9 @@ class ToolExecutor:
         self.ledger.append(exp)
         return {"created": exp.id, "status": "draft"}
 
-    def _tool_launch_experiment(self, exp_id: str, host: str | None = None) -> dict:
+    def _tool_launch_experiment(
+        self, exp_id: str, host: str | None = None, plan_step_id: str | None = None,
+    ) -> dict:
         exp = self.ledger.get(exp_id)
         if not exp:
             return {"error": f"Experiment {exp_id} not found"}
@@ -735,6 +871,40 @@ class ToolExecutor:
         if exp.status not in (ExperimentStatus.DRAFT, ExperimentStatus.QUEUED):
             return {"error": f"Cannot launch: status is {exp.status.value}"}
 
+        # --- Plan launch gate ---
+        from .plan import PlanManager
+        plan_mgr = PlanManager(self.project_path / "ledger")
+        plan = plan_mgr.load()
+
+        if plan is not None:
+            # Check guardrails
+            ok, reason = plan_mgr.check_guardrails()
+            if not ok:
+                return {"error": f"Launch blocked: {reason}", "plan_paused": True}
+
+            # Determine confirmation requirement
+            needs_confirm = False
+            if plan.autonomy == "supervised":
+                needs_confirm = True
+            elif plan_step_id:
+                step = next((s for s in plan.steps if s.id == plan_step_id), None)
+                if step and step.requires_confirmation:
+                    needs_confirm = True
+
+            if needs_confirm:
+                return {
+                    "needs_confirmation": True,
+                    "exp_id": exp_id,
+                    "plan_step_id": plan_step_id,
+                    "autonomy": plan.autonomy,
+                    "message": (
+                        "Human confirmation required before launch. "
+                        "Call human_confirm to approve, or switch to autonomous mode "
+                        "with update_plan(autonomy='autonomous')."
+                    ),
+                }
+
+        # --- Launch ---
         runner = create_runner(self.project_path, host=host)
         work_dir = self.project_path / "runs" / exp_id
         work_dir.mkdir(parents=True, exist_ok=True)
@@ -747,7 +917,36 @@ class ToolExecutor:
         exp = exp.model_copy(update={"run_id": run_id})
         self.ledger.update(exp)
 
-        return {"launched": exp_id, "run_id": run_id, "work_dir": str(work_dir)}
+        # Detect runner type for response hints
+        is_ssh = run_id.startswith("ssh:")
+        result: dict[str, Any] = {
+            "launched": exp_id,
+            "run_id": run_id,
+            "work_dir": str(work_dir),
+            "runner": "ssh" if is_ssh else "local",
+            "auto_synced": is_ssh,
+            "monitoring": {
+                "poll_with": "poll_experiment",
+                "suggested_poll_interval_seconds": 60 if is_ssh else 10,
+                "while_waiting": [
+                    "Review results of previous experiments",
+                    "Search for related papers with search_papers",
+                    "Prepare the next experiment in the plan",
+                    "Check experiment logs with get_experiment_logs",
+                ],
+            },
+        }
+
+        # --- Auto-bookkeeping: link to plan step ---
+        if plan is not None and plan_step_id:
+            try:
+                plan_mgr.update_step(plan_step_id, status="running", experiment_id=exp_id)
+                plan_mgr.increment_experiments_run()
+                result["plan_step_linked"] = plan_step_id
+            except ValueError as e:
+                logger.warning("Plan auto-link failed: %s", e)
+
+        return result
 
     def _tool_poll_experiment(self, exp_id: str) -> dict:
         exp = self.ledger.get(exp_id)
@@ -776,11 +975,40 @@ class ToolExecutor:
                 result["fetch_error"] = str(e)
             self.ledger.update(exp)
 
+            # Auto-bookkeeping: update plan step
+            self._plan_on_experiment_done(exp_id, "done")
+
         elif status.state == "failed" and exp.status == ExperimentStatus.RUNNING:
             exp = exp.transition(ExperimentStatus.FAILED)
             self.ledger.update(exp)
 
+            # Auto-bookkeeping: update plan step
+            paused, reason = self._plan_on_experiment_done(exp_id, "failed")
+            if paused:
+                result["plan_paused"] = True
+                result["plan_pause_reason"] = reason
+
         return result
+
+    def _plan_on_experiment_done(
+        self, exp_id: str, outcome: str,
+    ) -> tuple[bool, str | None]:
+        """Auto-update plan step when experiment completes/fails."""
+        from .plan import PlanManager
+        plan_mgr = PlanManager(self.project_path / "ledger")
+        step = plan_mgr.find_step_by_experiment(exp_id)
+        if step is None:
+            return False, None
+
+        try:
+            plan_mgr.update_step(step.id, status=outcome)
+            if outcome == "failed":
+                return plan_mgr.record_failure()
+            else:
+                plan_mgr.record_success()
+        except Exception as e:
+            logger.warning("Plan auto-bookkeeping failed: %s", e)
+        return False, None
 
     def _tool_record_results(self, exp_id: str, results: dict) -> dict:
         exp = self.ledger.get(exp_id)
@@ -856,6 +1084,19 @@ class ToolExecutor:
             ))
         except Exception as e:
             logger.debug(f"Auto-save note failed: {e}")
+
+        # Auto-bookkeeping: copy reflection to plan step notes
+        try:
+            from .plan import PlanManager
+            plan_mgr = PlanManager(self.project_path / "ledger")
+            step = plan_mgr.find_step_by_experiment(exp_id)
+            if step is not None:
+                summary = f"[{hypothesis_confirmed}] {analysis[:200]}"
+                existing = step.notes
+                new_notes = f"{existing}\n{summary}".strip() if existing else summary
+                plan_mgr.update_step(step.id, notes=new_notes)
+        except Exception as e:
+            logger.debug("Plan reflection auto-copy failed: %s", e)
 
         return {"reflected": exp_id, "hypothesis_status": exp.hypothesis.status}
 
@@ -1633,6 +1874,56 @@ class ToolExecutor:
             "experiments_completed": len(generator.completed),
         }
 
+    # --- Remote tools ---
+
+    def _tool_remote_exec(
+        self,
+        command: str,
+        host: str | None = None,
+        mutating: bool = False,
+        confirmed: bool = False,
+        timeout: int = 30,
+    ) -> dict:
+        """Execute a command on the remote SSH host."""
+        from ..runners.factory import create_runner as _create_runner
+        from ..runners.ssh import SSHRunner
+
+        runner = _create_runner(self.project_path, host=host)
+        if not isinstance(runner, SSHRunner):
+            return {"error": "remote_exec is only available for SSH runners"}
+
+        # Safety: mutating commands require explicit confirmation
+        if mutating and not confirmed:
+            return {
+                "needs_confirmation": True,
+                "command": command,
+                "host": host or "default",
+                "message": (
+                    "This command modifies remote state. "
+                    "Show it to the user and get approval, then call again "
+                    "with confirmed=true."
+                ),
+            }
+
+        # Cap timeout
+        timeout = min(max(timeout, 5), 600)
+
+        try:
+            result = runner._run_ssh(command, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return {
+                "error": f"Command timed out after {timeout}s",
+                "hint": f"Retry with a higher timeout (max 600s): timeout={min(timeout * 2, 600)}",
+                "host": runner.config.host,
+            }
+
+        return {
+            "exit_code": result.returncode,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "host": runner.config.host,
+        }
+
     # --- Plan tools ---
 
     def _tool_get_plan(self) -> dict:
@@ -1648,6 +1939,13 @@ class ToolExecutor:
         return {
             "goal": plan.goal,
             "version": plan.version,
+            "autonomy": plan.autonomy,
+            "paused": plan.paused,
+            "pause_reason": plan.pause_reason,
+            "experiments_run": plan.experiments_run,
+            "max_experiments": plan.max_experiments,
+            "consecutive_failures": plan.consecutive_failures,
+            "max_consecutive_failures": plan.max_consecutive_failures,
             "steps": [
                 {
                     "id": s.id,
@@ -1659,6 +1957,7 @@ class ToolExecutor:
                     "experiment_id": s.experiment_id,
                     "depends_on": s.depends_on,
                     "notes": s.notes,
+                    "requires_confirmation": s.requires_confirmation,
                 }
                 for s in plan.steps
             ],
@@ -1666,12 +1965,20 @@ class ToolExecutor:
             "progress": {
                 "total": len(plan.steps),
                 "done": sum(1 for s in plan.steps if s.status.value == "done"),
+                "failed": sum(1 for s in plan.steps if s.status.value == "failed"),
                 "pending": sum(1 for s in plan.steps if s.status.value == "pending"),
                 "skipped": sum(1 for s in plan.steps if s.status.value == "skipped"),
             },
         }
 
-    def _tool_create_plan(self, goal: str, steps: list[dict]) -> dict:
+    def _tool_create_plan(
+        self,
+        goal: str,
+        steps: list[dict],
+        autonomy: str = "autonomous",
+        max_experiments: int | None = None,
+        max_consecutive_failures: int = 2,
+    ) -> dict:
         """Create a new research plan."""
         from .plan import PlanManager
 
@@ -1679,7 +1986,12 @@ class ToolExecutor:
             return {"error": "Plan must have at least one step."}
 
         manager = PlanManager(self.project_path / "ledger")
-        plan = manager.create(goal, steps)
+        plan = manager.create(
+            goal, steps,
+            autonomy=autonomy,
+            max_experiments=max_experiments,
+            max_consecutive_failures=max_consecutive_failures,
+        )
 
         # Auto-save a note about the plan
         try:
@@ -1698,6 +2010,9 @@ class ToolExecutor:
             "goal": plan.goal,
             "steps_count": len(plan.steps),
             "step_ids": [s.id for s in plan.steps],
+            "autonomy": plan.autonomy,
+            "max_experiments": plan.max_experiments,
+            "max_consecutive_failures": plan.max_consecutive_failures,
         }
 
     def _tool_update_plan_step(
@@ -1707,13 +2022,14 @@ class ToolExecutor:
         priority: int | None = None,
         experiment_id: str | None = None,
         notes: str | None = None,
+        requires_confirmation: bool | None = None,
     ) -> dict:
         """Update a step in the research plan."""
         from .plan import PlanManager
 
         manager = PlanManager(self.project_path / "ledger")
 
-        kwargs = {}
+        kwargs: dict[str, Any] = {}
         if status is not None:
             kwargs["status"] = status
         if priority is not None:
@@ -1722,9 +2038,11 @@ class ToolExecutor:
             kwargs["experiment_id"] = experiment_id
         if notes is not None:
             kwargs["notes"] = notes
+        if requires_confirmation is not None:
+            kwargs["requires_confirmation"] = requires_confirmation
 
         if not kwargs:
-            return {"error": "No fields to update. Provide at least one of: status, priority, experiment_id, notes."}
+            return {"error": "No fields to update. Provide at least one of: status, priority, experiment_id, notes, requires_confirmation."}
 
         try:
             step = manager.update_step(step_id, **kwargs)
@@ -1735,6 +2053,57 @@ class ToolExecutor:
                 "priority": step.priority,
                 "experiment_id": step.experiment_id,
                 "notes": step.notes,
+                "requires_confirmation": step.requires_confirmation,
+            }
+        except ValueError as e:
+            return {"error": str(e)}
+
+    def _tool_update_plan(
+        self,
+        autonomy: str | None = None,
+        max_experiments: int | None = None,
+        max_consecutive_failures: int | None = None,
+        paused: bool | None = None,
+        pause_reason: str | None = None,
+    ) -> dict:
+        """Update plan-level settings."""
+        from .plan import PlanManager
+
+        manager = PlanManager(self.project_path / "ledger")
+        plan = manager.load()
+        if plan is None:
+            return {"error": "No plan exists. Use create_plan first."}
+
+        kwargs: dict[str, Any] = {}
+        if autonomy is not None:
+            kwargs["autonomy"] = autonomy
+        if max_experiments is not None:
+            kwargs["max_experiments"] = max_experiments
+        if max_consecutive_failures is not None:
+            kwargs["max_consecutive_failures"] = max_consecutive_failures
+        if paused is not None:
+            kwargs["paused"] = paused
+            # Auto-clear pause reason when resuming
+            if not paused:
+                kwargs["pause_reason"] = None
+                kwargs["consecutive_failures"] = 0
+        if pause_reason is not None:
+            kwargs["pause_reason"] = pause_reason
+
+        if not kwargs:
+            return {"error": "No fields to update."}
+
+        try:
+            plan = manager.update_plan_settings(**kwargs)
+            return {
+                "updated": True,
+                "autonomy": plan.autonomy,
+                "paused": plan.paused,
+                "pause_reason": plan.pause_reason,
+                "max_experiments": plan.max_experiments,
+                "experiments_run": plan.experiments_run,
+                "max_consecutive_failures": plan.max_consecutive_failures,
+                "consecutive_failures": plan.consecutive_failures,
             }
         except ValueError as e:
             return {"error": str(e)}

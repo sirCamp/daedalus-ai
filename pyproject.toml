@@ -33,6 +33,7 @@ dependencies = [
     "rich>=13.0",
     "click>=8.0",
     "pyyaml>=6.0",
+    "mcp>=1.0",
 ]
 
 [project.urls]
@@ -46,7 +47,7 @@ agent = [
     "anthropic>=0.40",
 ]
 mcp = [
-    "mcp>=1.0",
+    "mcp>=1.0",  # included in base deps, kept for backwards compat
 ]
 data = [
     "datasets>=2.14",

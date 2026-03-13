@@ -41,6 +41,14 @@ class TestInit:
         assert (project / "daedalus.yaml").exists()
         assert (project / "ledger" / "experiments.jsonl").exists()
         assert (project / "runner_config.yaml").exists()
+        assert (project / "CLAUDE.md").exists()
+
+    def test_init_claude_md_content(self, runner, tmp_path):
+        runner.invoke(cli, ["init", "my_project", "--path", str(tmp_path)])
+        content = (tmp_path / "my_project" / "CLAUDE.md").read_text()
+        assert "daedalus_*" in content
+        assert "MCP tools" in content
+        assert "ledger/" in content
 
     def test_init_existing_fails(self, runner, tmp_path):
         (tmp_path / "existing").mkdir()

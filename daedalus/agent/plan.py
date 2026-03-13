@@ -15,7 +15,7 @@ import logging
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -26,6 +26,7 @@ class PlanStepStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
     DONE = "done"
+    FAILED = "failed"
     SKIPPED = "skipped"
     BLOCKED = "blocked"
 
@@ -42,6 +43,7 @@ class PlanStep(BaseModel):
     experiment_id: str | None = None  # linked after launch
     depends_on: list[str] = []  # step IDs that must complete first
     tags: list[str] = []
+    requires_confirmation: bool = False  # require human confirm even in autonomous mode
     notes: str = ""  # post-hoc notes from agent
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -53,6 +55,13 @@ class ResearchPlan(BaseModel):
     goal: str
     steps: list[PlanStep] = []
     version: int = 1
+    autonomy: Literal["supervised", "autonomous"] = "autonomous"
+    max_experiments: int | None = None  # None = unlimited
+    max_consecutive_failures: int = 2
+    experiments_run: int = 0
+    consecutive_failures: int = 0
+    paused: bool = False
+    pause_reason: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -88,7 +97,14 @@ class PlanManager:
         self._sync_markdown(plan)
         logger.info("Plan saved: %d steps, version %d", len(plan.steps), plan.version)
 
-    def create(self, goal: str, steps: list[dict[str, Any]]) -> ResearchPlan:
+    def create(
+        self,
+        goal: str,
+        steps: list[dict[str, Any]],
+        autonomy: str = "autonomous",
+        max_experiments: int | None = None,
+        max_consecutive_failures: int = 2,
+    ) -> ResearchPlan:
         """Create a new plan from scratch, replacing any existing one."""
         plan_steps = []
         for i, s in enumerate(steps, 1):
@@ -100,10 +116,17 @@ class PlanManager:
                 priority=s.get("priority", 3),
                 depends_on=s.get("depends_on", []),
                 tags=s.get("tags", []),
+                requires_confirmation=s.get("requires_confirmation", False),
             )
             plan_steps.append(step)
 
-        plan = ResearchPlan(goal=goal, steps=plan_steps)
+        plan = ResearchPlan(
+            goal=goal,
+            steps=plan_steps,
+            autonomy=autonomy,
+            max_experiments=max_experiments,
+            max_consecutive_failures=max_consecutive_failures,
+        )
         self.save(plan)
         return plan
 
@@ -166,7 +189,7 @@ class PlanManager:
 
         done_or_skipped = {
             s.id for s in plan.steps
-            if s.status in (PlanStepStatus.DONE, PlanStepStatus.SKIPPED)
+            if s.status in (PlanStepStatus.DONE, PlanStepStatus.SKIPPED, PlanStepStatus.FAILED)
         }
         pending = [s for s in plan.steps if s.status == PlanStepStatus.PENDING]
 
@@ -193,6 +216,75 @@ class PlanManager:
         pending.sort(key=lambda s: (s.priority, s.id))
         return pending[0]
 
+    def find_step_by_experiment(self, exp_id: str) -> PlanStep | None:
+        """Find the plan step linked to an experiment ID."""
+        plan = self.load()
+        if plan is None:
+            return None
+        return next((s for s in plan.steps if s.experiment_id == exp_id), None)
+
+    def increment_experiments_run(self) -> None:
+        """Increment the experiments_run counter."""
+        plan = self.load()
+        if plan is None:
+            return
+        plan.experiments_run += 1
+        self.save(plan)
+
+    def record_success(self) -> None:
+        """Record a successful experiment — resets consecutive failure counter."""
+        plan = self.load()
+        if plan is None:
+            return
+        plan.consecutive_failures = 0
+        self.save(plan)
+
+    def record_failure(self) -> tuple[bool, str | None]:
+        """Record a failure. Returns (paused, reason) if guardrail triggers."""
+        plan = self.load()
+        if plan is None:
+            return False, None
+        plan.consecutive_failures += 1
+        if plan.consecutive_failures >= plan.max_consecutive_failures:
+            plan.paused = True
+            plan.pause_reason = (
+                f"Guardrail: {plan.consecutive_failures} consecutive failures "
+                f"(limit: {plan.max_consecutive_failures})"
+            )
+            self.save(plan)
+            return True, plan.pause_reason
+        self.save(plan)
+        return False, None
+
+    def check_guardrails(self) -> tuple[bool, str | None]:
+        """Check if any guardrail blocks execution. Returns (ok, reason)."""
+        plan = self.load()
+        if plan is None:
+            return True, None
+        if plan.paused:
+            return False, plan.pause_reason or "Plan is paused"
+        if plan.max_experiments is not None and plan.experiments_run >= plan.max_experiments:
+            plan.paused = True
+            plan.pause_reason = (
+                f"Guardrail: max experiments reached "
+                f"({plan.experiments_run}/{plan.max_experiments})"
+            )
+            self.save(plan)
+            return False, plan.pause_reason
+        return True, None
+
+    def update_plan_settings(self, **kwargs: Any) -> ResearchPlan:
+        """Update plan-level settings (autonomy, guardrails, pause)."""
+        plan = self.load()
+        if plan is None:
+            raise ValueError("No plan exists.")
+        for key, value in kwargs.items():
+            if hasattr(plan, key):
+                setattr(plan, key, value)
+        plan.version += 1
+        self.save(plan)
+        return plan
+
     def format_for_context(self) -> str:
         """Format the plan for agent context injection."""
         plan = self.load()
@@ -201,10 +293,25 @@ class PlanManager:
 
         lines = [f"**Research Plan**: {plan.goal} (v{plan.version})\n"]
 
+        # Autonomy status
+        mode_label = "AUTONOMOUS" if plan.autonomy == "autonomous" else "SUPERVISED"
+        lines.append(f"Mode: **{mode_label}**")
+        if plan.max_experiments is not None:
+            lines.append(f"Experiments: {plan.experiments_run}/{plan.max_experiments}")
+        if plan.consecutive_failures > 0:
+            lines.append(
+                f"Consecutive failures: {plan.consecutive_failures}/"
+                f"{plan.max_consecutive_failures}"
+            )
+        if plan.paused:
+            lines.append(f"**PAUSED**: {plan.pause_reason}")
+        lines.append("")
+
         status_icons = {
             PlanStepStatus.PENDING: "[ ]",
             PlanStepStatus.RUNNING: "[~]",
             PlanStepStatus.DONE: "[x]",
+            PlanStepStatus.FAILED: "[!]",
             PlanStepStatus.SKIPPED: "[-]",
             PlanStepStatus.BLOCKED: "[!]",
         }
@@ -213,16 +320,18 @@ class PlanManager:
             icon = status_icons.get(step.status, "[ ]")
             exp_ref = f" → {step.experiment_id}" if step.experiment_id else ""
             deps = f" (after {', '.join(step.depends_on)})" if step.depends_on else ""
-            lines.append(f"{icon} **{step.id}** [P{step.priority}]{deps}: {step.description}{exp_ref}")
+            confirm = " [confirm]" if step.requires_confirmation else ""
+            lines.append(f"{icon} **{step.id}** [P{step.priority}]{deps}: {step.description}{exp_ref}{confirm}")
             if step.notes:
                 lines.append(f"    ↳ {step.notes}")
 
         # Summary
         total = len(plan.steps)
         done = sum(1 for s in plan.steps if s.status == PlanStepStatus.DONE)
+        failed = sum(1 for s in plan.steps if s.status == PlanStepStatus.FAILED)
         skipped = sum(1 for s in plan.steps if s.status == PlanStepStatus.SKIPPED)
         pending = sum(1 for s in plan.steps if s.status == PlanStepStatus.PENDING)
-        lines.append(f"\nProgress: {done}/{total} done, {skipped} skipped, {pending} pending")
+        lines.append(f"\nProgress: {done}/{total} done, {failed} failed, {skipped} skipped, {pending} pending")
 
         return "\n".join(lines)
 

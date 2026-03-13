@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shlex
 import signal
 import subprocess
 from pathlib import Path
@@ -26,8 +27,9 @@ class LocalRunner:
     between CLI invocations.
     """
 
-    def __init__(self, python: str = "python") -> None:
+    def __init__(self, python: str = "python", project_path: Path | None = None) -> None:
         self.python = python
+        self.project_path = project_path
         self._processes: dict[str, subprocess.Popen] = {}
 
     @staticmethod
@@ -54,12 +56,30 @@ class LocalRunner:
         logs_dir = work_dir / "logs"
         logs_dir.mkdir(exist_ok=True)
 
+        # Resolve relative script paths against project root so they work
+        # from the work_dir cwd. If no project_path, paths stay as-is.
+        config = experiment.config
+        if self.project_path:
+            script_path = Path(config.script)
+            if not script_path.is_absolute():
+                resolved = (self.project_path / script_path).resolve()
+                if resolved.exists():
+                    config = config.model_copy(update={"script": str(resolved)})
+            if config.eval_script:
+                eval_path = Path(config.eval_script)
+                if not eval_path.is_absolute():
+                    resolved_eval = (self.project_path / eval_path).resolve()
+                    if resolved_eval.exists():
+                        config = config.model_copy(update={"eval_script": str(resolved_eval)})
+
         # Build command
-        if experiment.config.eval_script:
+        if config.eval_script:
             # Multi-step: train then eval
-            cmd = self._build_pipeline_cmd(experiment, work_dir)
+            cmd = self._build_pipeline_cmd(
+                experiment.model_copy(update={"config": config}), work_dir
+            )
         else:
-            cmd = build_launch_cmd(experiment.config, python=self.python)
+            cmd = build_launch_cmd(config, python=self.python)
 
         # Environment
         env = os.environ.copy()
@@ -109,8 +129,8 @@ class LocalRunner:
             eval_cmd_parts.append(f"--{key}")
             eval_cmd_parts.append(str(value))
 
-        train_cmd = " ".join(str(p) for p in train_cmd_parts)
-        eval_cmd = " ".join(str(p) for p in eval_cmd_parts)
+        train_cmd = " ".join(shlex.quote(str(p)) for p in train_cmd_parts)
+        eval_cmd = " ".join(shlex.quote(str(p)) for p in eval_cmd_parts)
 
         # Write pipeline script
         pipeline_script = work_dir / "_daedalus_pipeline.sh"

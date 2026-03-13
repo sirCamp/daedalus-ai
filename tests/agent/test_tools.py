@@ -65,6 +65,50 @@ class TestToolExecutor:
         assert len(result["experiments"]) == 1
         assert result["experiments"][0]["id"] == exp_id
 
+    def test_create_experiment_resolves_script_name(self, tmp_path):
+        """script: 'train' (registry name) should resolve to 'train.py' (path)."""
+        project = _setup_project(tmp_path)
+
+        # Add scripts registry to daedalus.yaml
+        import yaml
+        (project / "daedalus.yaml").write_text(yaml.dump({
+            "project_name": "test",
+            "runner": {"type": "local"},
+            "scripts": {
+                "train": {"path": "train.py", "description": "Training script"},
+                "eval": {"path": "evaluate.py", "description": "Eval script"},
+            },
+        }))
+
+        executor = ToolExecutor(project)
+        result = json.loads(executor.execute("create_experiment", {
+            "hypothesis_statement": "test script name resolution",
+            "rationale": "test",
+            "script": "train",  # name, not path
+            "eval_script": "eval",  # name, not path
+        }))
+        assert "created" in result
+        exp_id = result["created"]
+
+        exp_data = json.loads(executor.execute("get_experiment", {"exp_id": exp_id}))
+        assert exp_data["experiment"]["config"]["script"] == "train.py"
+        assert exp_data["experiment"]["config"]["eval_script"] == "evaluate.py"
+
+    def test_create_experiment_keeps_direct_path(self, tmp_path):
+        """script: 'custom/script.py' (not in registry) should stay as-is."""
+        project = _setup_project(tmp_path)
+        executor = ToolExecutor(project)
+
+        result = json.loads(executor.execute("create_experiment", {
+            "hypothesis_statement": "test direct path",
+            "rationale": "test",
+            "script": "custom/train.py",
+        }))
+        exp_id = result["created"]
+
+        exp_data = json.loads(executor.execute("get_experiment", {"exp_id": exp_id}))
+        assert exp_data["experiment"]["config"]["script"] == "custom/train.py"
+
     def test_get_experiment(self, tmp_path):
         project = _setup_project(tmp_path)
         executor = ToolExecutor(project)

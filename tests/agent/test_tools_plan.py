@@ -151,7 +151,8 @@ class TestToolSchemas:
         assert "get_plan" in names
         assert "create_plan" in names
         assert "update_plan_step" in names
+        assert "update_plan" in names
 
     def test_total_tool_count(self):
         from daedalus.agent.tools import TOOL_SCHEMAS
-        assert len(TOOL_SCHEMAS) == 28  # was 25, +3 plan tools
+        assert len(TOOL_SCHEMAS) == 30  # 25 base + 1 remote + 4 plan tools

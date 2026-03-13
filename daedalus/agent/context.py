@@ -71,10 +71,10 @@ class ContextBuilder:
     def _format_experiment_detail(self, exp) -> str:
         """Format a single experiment with full detail."""
         status_icon = {
-            "draft": "📝", "queued": "⏳", "running": "🔄",
-            "completed": "✅", "analyzed": "📊",
-            "failed": "❌", "abandoned": "🚫",
-        }.get(exp.status.value, "?")
+            "draft": "[draft]", "queued": "[queued]", "running": "[running]",
+            "completed": "[done]", "analyzed": "[analyzed]",
+            "failed": "[FAILED]", "abandoned": "[abandoned]",
+        }.get(exp.status.value, "[?]")
 
         line = f"{status_icon} **{exp.id}** ({exp.status.value}): {exp.hypothesis.statement}"
 

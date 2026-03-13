@@ -27,7 +27,7 @@ def create_runner(
     # Load project config
     daedalus_yaml = project_path / "daedalus.yaml"
     if not daedalus_yaml.exists():
-        return LocalRunner()
+        return LocalRunner(project_path=project_path)
 
     project_config = yaml.safe_load(daedalus_yaml.read_text()) or {}
     runner_spec = project_config.get("runner", {})
@@ -41,11 +41,14 @@ def create_runner(
 
     if runner_type == "local":
         local_config = runner_config.get("local", {})
-        return LocalRunner(python=local_config.get("python", "python"))
+        return LocalRunner(
+            python=local_config.get("python", "python"),
+            project_path=project_path,
+        )
 
     if runner_type == "ssh":
         ssh_config = _resolve_ssh_config(runner_spec, runner_config, host)
-        return SSHRunner(SSHConfig(**ssh_config))
+        return SSHRunner(SSHConfig(**ssh_config), project_path=project_path)
 
     raise ValueError(f"Unknown runner type: {runner_type}")
 

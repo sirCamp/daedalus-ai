@@ -29,12 +29,12 @@ User: /daedalus:inspect-data data/train.jsonl
 Agent: [calls daedalus_inspect_dataset, daedalus_validate_dataset]
 
        Dataset: 15,432 rows, 3 columns (prompt, chosen, rejected)
-       Format: DPO ✓
+       Format: DPO (valid)
        Tokens: ~2.1M (estimated)
 
        Issues found:
-       ⚠ 127 duplicates (0.8%) — below threshold
-       ✗ 3 empty 'rejected' fields — MUST FIX
+       WARNING: 127 duplicates (0.8%) — below threshold
+       ERROR: 3 empty 'rejected' fields — MUST FIX
 
        Showing 3 samples...
 ```

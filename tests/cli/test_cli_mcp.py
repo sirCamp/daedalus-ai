@@ -1,6 +1,8 @@
 """Tests for install-mcp and uninstall-mcp CLI commands."""
 
 import json
+import os
+from unittest.mock import patch
 
 import pytest
 from click.testing import CliRunner
@@ -25,116 +27,135 @@ def project_dir(tmp_path):
     return project
 
 
+def _mock_subprocess_run(returncode: int = 0, stderr: str = ""):
+    """Create a mock for subprocess.run that returns given results."""
+    from unittest.mock import MagicMock
+    mock_result = MagicMock()
+    mock_result.returncode = returncode
+    mock_result.stdout = ""
+    mock_result.stderr = stderr
+    return MagicMock(return_value=mock_result)
+
+
 class TestInstallMCP:
-    def test_install_project_level(self, runner, project_dir):
-        """install-mcp creates .claude/settings.json in project dir."""
-        result = runner.invoke(cli, ["-p", str(project_dir), "install-mcp"])
-        assert result.exit_code == 0
-
-        settings_file = project_dir / ".claude" / "settings.json"
-        assert settings_file.exists()
-
-        settings = json.loads(settings_file.read_text())
-        assert "mcpServers" in settings
-        assert "daedalus" in settings["mcpServers"]
-
-        server = settings["mcpServers"]["daedalus"]
-        assert server["args"][1] == "daedalus.mcp_server"
-        assert server["args"][3] == str(project_dir)
-
-    def test_install_global(self, runner, project_dir, tmp_path, monkeypatch):
-        """install-mcp --global writes to ~/.claude/settings.json."""
+    def test_install_calls_claude_mcp_add(self, runner, project_dir, tmp_path):
+        """install-mcp calls `claude mcp add` with correct args."""
+        mock_run = _mock_subprocess_run()
         fake_home = tmp_path / "fakehome"
-        fake_home.mkdir()
-        monkeypatch.setattr("pathlib.Path.home", lambda: fake_home)
+        (fake_home / ".claude").mkdir(parents=True)
+        (fake_home / ".claude" / "settings.json").write_text("{}")
 
-        result = runner.invoke(cli, ["-p", str(project_dir), "install-mcp", "--global"])
+        with patch("shutil.which", return_value="/usr/bin/claude"), \
+             patch("subprocess.run", mock_run), \
+             patch("pathlib.Path.home", return_value=fake_home):
+            result = runner.invoke(cli, ["-p", str(project_dir), "install-mcp"])
+
         assert result.exit_code == 0
+        # Should have called subprocess.run twice: remove + add
+        assert mock_run.call_count == 2
 
-        settings_file = fake_home / ".claude" / "settings.json"
-        assert settings_file.exists()
+        # Second call is the `add`
+        add_call = mock_run.call_args_list[1]
+        cmd = add_call[0][0]
+        assert "mcp" in cmd
+        assert "add" in cmd
+        assert "-s" in cmd
+        assert "user" in cmd  # default scope
+        assert "daedalus" in cmd
+        assert "-m" in cmd
+        assert "daedalus.mcp_server" in cmd
 
-        settings = json.loads(settings_file.read_text())
-        # Global install uses "." so the server auto-detects from workspace cwd
-        assert settings["mcpServers"]["daedalus"]["args"][3] == "."
+    def test_install_project_scope(self, runner, project_dir, tmp_path):
+        """install-mcp --scope project passes project scope."""
+        mock_run = _mock_subprocess_run()
+        fake_home = tmp_path / "fakehome"
+        (fake_home / ".claude").mkdir(parents=True)
+        (fake_home / ".claude" / "settings.json").write_text("{}")
 
-    def test_install_preserves_existing_settings(self, runner, project_dir):
-        """install-mcp preserves existing settings."""
-        claude_dir = project_dir / ".claude"
-        claude_dir.mkdir()
-        (claude_dir / "settings.json").write_text(json.dumps({
-            "theme": "dark",
-            "mcpServers": {
-                "other": {"command": "node", "args": ["other.js"]},
-            },
-        }))
+        with patch("shutil.which", return_value="/usr/bin/claude"), \
+             patch("subprocess.run", mock_run), \
+             patch("pathlib.Path.home", return_value=fake_home):
+            result = runner.invoke(cli, [
+                "-p", str(project_dir), "install-mcp", "--scope", "project",
+            ])
 
-        result = runner.invoke(cli, ["-p", str(project_dir), "install-mcp"])
         assert result.exit_code == 0
+        add_call = mock_run.call_args_list[1]
+        cmd = add_call[0][0]
+        assert "project" in cmd
 
-        settings = json.loads((claude_dir / "settings.json").read_text())
-        assert settings["theme"] == "dark"
-        assert "other" in settings["mcpServers"]
-        assert "daedalus" in settings["mcpServers"]
-
-    def test_install_custom_python(self, runner, project_dir):
+    def test_install_custom_python(self, runner, project_dir, tmp_path):
         """install-mcp --python uses custom python path."""
-        result = runner.invoke(cli, [
-            "-p", str(project_dir),
-            "install-mcp", "--python", "/usr/bin/python3.12",
-        ])
-        assert result.exit_code == 0
+        mock_run = _mock_subprocess_run()
+        fake_home = tmp_path / "fakehome"
+        (fake_home / ".claude").mkdir(parents=True)
+        (fake_home / ".claude" / "settings.json").write_text("{}")
 
-        settings = json.loads(
-            (project_dir / ".claude" / "settings.json").read_text()
-        )
-        assert settings["mcpServers"]["daedalus"]["command"] == "/usr/bin/python3.12"
+        with patch("shutil.which", return_value="/usr/bin/claude"), \
+             patch("subprocess.run", mock_run), \
+             patch("pathlib.Path.home", return_value=fake_home):
+            result = runner.invoke(cli, [
+                "-p", str(project_dir),
+                "install-mcp", "--python", "/usr/bin/python3.12",
+            ])
+
+        assert result.exit_code == 0
+        add_call = mock_run.call_args_list[1]
+        cmd = add_call[0][0]
+        assert "/usr/bin/python3.12" in cmd
+
+    def test_install_no_claude_cli(self, runner, project_dir):
+        """install-mcp fails gracefully when claude CLI is not found."""
+        with patch("shutil.which", return_value=None):
+            result = runner.invoke(cli, ["-p", str(project_dir), "install-mcp"])
+
+        assert result.exit_code != 0
+        assert "claude" in result.output.lower()
+
+    def test_install_auto_approves_tools(self, runner, project_dir, tmp_path):
+        """install-mcp adds mcp__daedalus__* to allowed permissions."""
+        mock_run = _mock_subprocess_run()
+        fake_home = tmp_path / "fakehome"
+        (fake_home / ".claude").mkdir(parents=True)
+        (fake_home / ".claude" / "settings.json").write_text("{}")
+
+        with patch("shutil.which", return_value="/usr/bin/claude"), \
+             patch("subprocess.run", mock_run), \
+             patch("pathlib.Path.home", return_value=fake_home):
+            runner.invoke(cli, ["-p", str(project_dir), "install-mcp"])
+
+        settings = json.loads((fake_home / ".claude" / "settings.json").read_text())
+        assert "mcp__daedalus__*" in settings["permissions"]["allow"]
 
 
 class TestUninstallMCP:
-    def test_uninstall_removes_daedalus(self, runner, project_dir):
-        """uninstall-mcp removes daedalus from settings."""
-        # First install
-        runner.invoke(cli, ["-p", str(project_dir), "install-mcp"])
-        # Then uninstall
-        result = runner.invoke(cli, ["-p", str(project_dir), "uninstall-mcp"])
+    def test_uninstall_calls_claude_mcp_remove(self, runner, project_dir):
+        """uninstall-mcp calls `claude mcp remove`."""
+        mock_run = _mock_subprocess_run()
+
+        with patch("shutil.which", return_value="/usr/bin/claude"), \
+             patch("subprocess.run", mock_run):
+            result = runner.invoke(cli, ["-p", str(project_dir), "uninstall-mcp"])
+
         assert result.exit_code == 0
-
-        settings = json.loads(
-            (project_dir / ".claude" / "settings.json").read_text()
-        )
-        assert "daedalus" not in settings.get("mcpServers", {})
-
-    def test_uninstall_preserves_other_servers(self, runner, project_dir):
-        """uninstall-mcp keeps other MCP servers."""
-        claude_dir = project_dir / ".claude"
-        claude_dir.mkdir()
-        (claude_dir / "settings.json").write_text(json.dumps({
-            "mcpServers": {
-                "daedalus": {"command": "python", "args": []},
-                "other": {"command": "node", "args": []},
-            },
-        }))
-
-        result = runner.invoke(cli, ["-p", str(project_dir), "uninstall-mcp"])
-        assert result.exit_code == 0
-
-        settings = json.loads((claude_dir / "settings.json").read_text())
-        assert "other" in settings["mcpServers"]
-        assert "daedalus" not in settings["mcpServers"]
-
-    def test_uninstall_no_settings_file(self, runner, project_dir):
-        """uninstall-mcp handles missing settings file gracefully."""
-        result = runner.invoke(cli, ["-p", str(project_dir), "uninstall-mcp"])
-        assert result.exit_code == 0
-        assert "No settings file" in result.output
+        cmd = mock_run.call_args[0][0]
+        assert "remove" in cmd
+        assert "daedalus" in cmd
 
     def test_uninstall_not_registered(self, runner, project_dir):
         """uninstall-mcp handles not-registered gracefully."""
-        claude_dir = project_dir / ".claude"
-        claude_dir.mkdir()
-        (claude_dir / "settings.json").write_text(json.dumps({"mcpServers": {}}))
+        mock_run = _mock_subprocess_run(returncode=1, stderr="Server not found")
 
-        result = runner.invoke(cli, ["-p", str(project_dir), "uninstall-mcp"])
+        with patch("shutil.which", return_value="/usr/bin/claude"), \
+             patch("subprocess.run", mock_run):
+            result = runner.invoke(cli, ["-p", str(project_dir), "uninstall-mcp"])
+
         assert result.exit_code == 0
-        assert "not registered" in result.output
+        assert "not registered" in result.output.lower()
+
+    def test_uninstall_no_claude_cli(self, runner, project_dir):
+        """uninstall-mcp fails gracefully when claude CLI is not found."""
+        with patch("shutil.which", return_value=None):
+            result = runner.invoke(cli, ["-p", str(project_dir), "uninstall-mcp"])
+
+        assert result.exit_code != 0
