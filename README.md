@@ -556,7 +556,9 @@ The `suggest_next` tool analyzes experiment history and suggests what to try:
 
 When using Daedalus via MCP in Claude Code, experiments are monitored with **background watchdog agents** — not sleep loops or inline polling.
 
-After launching experiments, Claude Code spawns one background Agent per experiment:
+Two strategies based on expected training time:
+
+**Short watch** (ETA < 30 min) — frequent updates, needs relaunching:
 
 ```
 Agent(
@@ -572,12 +574,29 @@ Agent(
 )
 ```
 
+**Long watch** (ETA > 30 min, overnight, unattended) — sleeps first, then polls until done:
+
+```
+Agent(
+  description="Watch exp_abc123 (long)",
+  prompt="Monitor experiment exp_abc123 which has an ETA of ~3 hours.
+    First sleep 9000 (2.5h) to avoid wasting poll cycles.
+    Then do poll cycles every 60s until completed or problem detected
+    (NaN loss, OOM, process died). On completion or problem, return
+    immediately with a full report. Max 60 poll cycles after the initial sleep.",
+  subagent_type="general-purpose",
+  run_in_background=true
+)
+```
+
+For long watch, calculate the initial sleep as ~80% of the ETA. The watchdog handles the full training duration without needing anyone to relaunch it — ideal for overnight runs.
+
 Each watchdog returns one of:
 - **COMPLETED** — final metrics, ready for analysis
 - **ALERT** — problem detected (NaN, OOM, CUDA error), with diagnosis
-- **PROGRESS** — still running, current step/loss/ETA
+- **PROGRESS** — (short watch only) still running, current step/loss/ETA
 
-When a watchdog returns, the main agent shows status, reacts to alerts, does productive work (reflect, search papers, prepare next experiment), and relaunches the watchdog if the experiment is still running.
+When a short watchdog returns, the main agent shows status, does productive work, and relaunches. When a long watchdog returns, it means the experiment completed or failed — go straight to analysis.
 
 **Anti-patterns**: Never use `Bash(sleep N)` in the main conversation. Never use CronCreate or any invented polling mechanism. Never poll inline in a loop.
 

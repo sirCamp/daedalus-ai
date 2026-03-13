@@ -140,10 +140,11 @@ After `launch_experiment`, the response includes monitoring hints:
 
 **Use Claude Code's Agent tool to launch background watchdog agents.**
 
-#### How It Works (concrete example)
+#### Two Watchdog Strategies
 
-After launching experiments, use Claude Code's `Agent` tool to spawn a background watchdog:
+Choose based on expected training time:
 
+**Short watch** (ETA < 30 min, or interactive monitoring):
 ```
 Agent(
   description="Watch exp_abc123",
@@ -153,16 +154,30 @@ Agent(
 )
 ```
 
+**Long watch** (ETA > 30 min, overnight, or unattended):
+```
+Agent(
+  description="Watch exp_abc123 (long)",
+  prompt="Monitor experiment exp_abc123 which has an ETA of ~3 hours. First sleep 9000 (2.5h) to avoid wasting poll cycles. Then do poll cycles every 60s until completed or problem detected (NaN loss, OOM, process died). On completion or problem, return immediately with a full report. Max 60 poll cycles after the initial sleep.",
+  subagent_type="general-purpose",
+  run_in_background=true
+)
+```
+
+For long watch, calculate the initial sleep as ~80% of the ETA in seconds. This avoids wasting cycles and ensures the watchdog catches completion without anyone needing to relaunch it. Use this for overnight runs or when the user is away.
+
 Launch **one watchdog per running experiment**. Each watchdog:
 
-1. Does 3-5 poll cycles with `sleep 60` between them (~5 min total)
-2. On **problem detected** (NaN/Inf loss, OOM, CUDA error, process died) → returns ALERT immediately
-3. On **experiment completed** → returns final results
-4. After 3-5 cycles with no event → returns a PROGRESS report (step, loss, ETA)
+1. (Long watch only) Sleeps for ~80% of the estimated training time
+2. Does poll cycles with `sleep 60` between them
+3. On **problem detected** (NaN/Inf loss, OOM, CUDA error, process died) → returns ALERT immediately
+4. On **experiment completed** → returns final results
+5. (Short watch) After 3-5 cycles with no event → returns a PROGRESS report (step, loss, ETA)
+6. (Long watch) Keeps polling until completion — no early return with PROGRESS
 
 #### Main Agent Cycle
 
-When a watchdog returns, the main agent reactivates:
+When a **short watchdog** returns, the main agent reactivates:
 
 1. **Show status to the user**:
    ```
@@ -179,7 +194,13 @@ When a watchdog returns, the main agent reactivates:
 4. **Relaunch watchdog(s)** for experiments still running
 5. Wait for next watchdog return (or user input)
 
-This creates a natural cycle: watchdog returns every ~5 min → main agent wakes up → shows status → does work → relaunches → waits.
+When a **long watchdog** returns, it means the experiment completed or failed — go straight to analysis.
+
+#### When to Use Which
+
+- **Short watch**: experiment ETA < 30 min, user is actively working, wants frequent updates
+- **Long watch**: experiment ETA > 30 min, overnight runs, user going AFK, batch runs on remote GPUs
+- When in doubt, use **long watch** — it covers completion without requiring relaunches
 
 ## Research Principles
 

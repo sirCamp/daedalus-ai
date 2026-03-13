@@ -41,12 +41,15 @@ The research-assistant agent orchestrates the workflow:
 
 After launch, immediately start monitoring with background watchdog agents:
 
-1. Launch one background Agent per experiment (see `/daedalus:watch` for the exact Agent call)
-2. Each watchdog does 3-5 poll cycles, then returns a progress/alert/completion report
-3. Do productive work while watchdogs run
-4. When a watchdog returns, show status to user and relaunch if still running
+1. Estimate remaining training time from launch response hints
+2. Choose strategy: **short watch** (ETA < 30 min) or **long watch** (ETA > 30 min)
+3. Launch one background Agent per experiment (see `/daedalus:watch` for details)
+4. Do productive work while watchdogs run
+5. Short watch: when watchdog returns with PROGRESS, relaunch. Long watch: watchdog sleeps first, then polls until done — no relaunch needed.
 
-NEVER use `Bash(sleep N)` or inline polling loops. NEVER use CronCreate.
+For overnight or long runs, always use **long watch** with an initial sleep of ~80% of ETA. This ensures the watchdog covers the full training without needing anyone to relaunch it.
+
+NEVER use `Bash(sleep N)` in the main conversation. NEVER use CronCreate.
 
 ## Auto-Bookkeeping
 

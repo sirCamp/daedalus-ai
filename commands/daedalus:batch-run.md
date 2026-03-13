@@ -18,18 +18,24 @@ Launch a battery of experiments in parallel, optionally distributed across multi
 
 After batch launch, do NOT stop and wait for user input. Immediately start monitoring:
 
+1. Estimate ETA for each experiment from launch response hints
+2. Use **long watch** for experiments with ETA > 30 min (typical for batch runs)
+3. Launch one background watchdog Agent per experiment
+
 ```
 Agent(
-  description="Watch exp_ID",
-  prompt="Monitor experiment exp_ID. Do 3-5 cycles: (1) daedalus_poll_experiment, (2) daedalus_get_experiment_logs(tail=30), (3) check for NaN loss, OOM, process death. If completed or problem, return immediately. Otherwise sleep 60 and repeat. After 5 cycles return progress report.",
+  description="Watch exp_ID (long)",
+  prompt="Monitor experiment exp_ID which has an ETA of ~3 hours. First sleep 9000 (2.5h) to avoid wasting poll cycles. Then do poll cycles every 60s until completed or problem detected (NaN loss, OOM, process died). On completion or problem, return immediately with a full report. Max 60 poll cycles after the initial sleep.",
   subagent_type="general-purpose",
   run_in_background=true
 )
 ```
 
-Launch one watchdog per experiment. While watchdogs run, do productive work (reflect on previous results, search papers, prepare next configs).
+For short experiments (ETA < 30 min), use the short watch pattern instead (3-5 cycles, no initial sleep). See `/daedalus:watch` for details.
 
-NEVER use `Bash(sleep N)` or inline polling. NEVER use CronCreate.
+While watchdogs run, do productive work (reflect on previous results, search papers, prepare next configs).
+
+NEVER use `Bash(sleep N)` in the main conversation. NEVER use CronCreate.
 
 ## Example
 

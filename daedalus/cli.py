@@ -110,22 +110,34 @@ quick (~3-5 exp), thorough (~10-20), production-ready (~20-30+)
 After launching experiments, monitor them with background watchdog agents.
 NEVER block the main conversation with sleep or inline polling loops.
 
-Launch one watchdog per experiment using Claude Code's Agent tool:
+Two strategies — choose based on estimated training time:
 
+**Short watch** (ETA < 30 min): 3-5 poll cycles, returns PROGRESS, relaunch needed.
 ```
 Agent(
   description="Watch exp_ID",
   prompt="Monitor experiment exp_ID. Do 3-5 cycles: \
 (1) daedalus_poll_experiment, (2) daedalus_get_experiment_logs(tail=30), \
-(3) check for NaN loss, OOM, process death. If completed or problem, return immediately. \
+(3) check for NaN/OOM/death. If completed or problem, return immediately. \
 Otherwise sleep 60 and repeat. After 5 cycles return progress report.",
   subagent_type="general-purpose",
   run_in_background=true
 )
 ```
 
-When a watchdog returns: show status to user, react to alerts, do productive work \
-(reflect, search papers, prepare next experiment), relaunch watchdog if still running.
+**Long watch** (ETA > 30 min, overnight): initial sleep (~80% of ETA), then polls until done.
+```
+Agent(
+  description="Watch exp_ID (long)",
+  prompt="Monitor experiment exp_ID, ETA ~3h. First sleep 9000 (2.5h). \
+Then poll every 60s until completed or problem detected. \
+Return immediately with full report on completion or error. Max 60 poll cycles.",
+  subagent_type="general-purpose",
+  run_in_background=true
+)
+```
+
+When in doubt, use **long watch** — it covers the full training without relaunches.
 
 ## Workflow
 
