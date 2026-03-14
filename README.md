@@ -209,7 +209,7 @@ hosts:
 
 | Command | Description |
 |---------|-------------|
-| `daedalus init NAME` | Create a new research project |
+| `daedalus init NAME` | Initialize a research project (works on new or existing directories) |
 | `daedalus status` | Show experiment counts, active runs, best result |
 | `daedalus ledger [-n N]` | Show last N experiments |
 | `daedalus narrative` | Auto-generated research narrative |
@@ -768,7 +768,7 @@ Demonstrates: plan mode, HuggingFace integration, learning rate search, reflecti
 # Install with dev dependencies
 pip install -e ".[dev]"
 
-# Run tests (478 tests)
+# Run tests (479 tests)
 python -m pytest tests/ -q
 
 # Run with coverage

@@ -50,10 +50,31 @@ class TestInit:
         assert "MCP tools" in content
         assert "ledger/" in content
 
-    def test_init_existing_fails(self, runner, tmp_path):
-        (tmp_path / "existing").mkdir()
+    def test_init_existing_dir_creates_missing_files(self, runner, tmp_path):
+        """Init on existing dir creates only missing files, never overwrites."""
+        project = tmp_path / "existing"
+        project.mkdir()
+        # Pre-create program.md with custom content
+        (project / "program.md").write_text("my custom program")
+
         result = runner.invoke(cli, ["init", "existing", "--path", str(tmp_path)])
-        assert result.exit_code != 0
+        assert result.exit_code == 0
+
+        # Custom file preserved
+        assert (project / "program.md").read_text() == "my custom program"
+        # Missing files created
+        assert (project / "daedalus.yaml").exists()
+        assert (project / "CLAUDE.md").exists()
+        assert (project / "ledger" / "experiments.jsonl").exists()
+        # Skipped message shown
+        assert "Skipped" in result.output or "existing" in result.output
+
+    def test_init_fully_initialized_project(self, runner, tmp_path):
+        """Running init twice reports already initialized."""
+        runner.invoke(cli, ["init", "myproj", "--path", str(tmp_path)])
+        result = runner.invoke(cli, ["init", "myproj", "--path", str(tmp_path)])
+        assert result.exit_code == 0
+        assert "already fully initialized" in result.output
 
 
 class TestStatus:

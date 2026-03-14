@@ -6,14 +6,14 @@
   },
   "metadata": {
     "description": "AI research assistant for hypothesis-driven ML experiments",
-    "version": "0.2.0"
+    "version": "0.2.1"
   },
   "plugins": [
     {
       "name": "daedalus-ai",
       "source": ".",
       "description": "AI research assistant for hypothesis-driven ML experiments. MCP tools for experiment lifecycle, dataset validation, parameter exploration, and literature review.",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "license": "MIT",
       "keywords": [
         "ml",

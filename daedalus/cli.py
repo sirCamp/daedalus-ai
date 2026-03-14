@@ -163,20 +163,41 @@ When in doubt, use **long watch** — it covers the full training without relaun
 @click.option("--path", type=click.Path(), default=".",
               help="Parent directory (default: current)")
 def init(name: str, path: str) -> None:
-    """Initialize a new research project."""
-    project_dir = Path(path) / name
-    if project_dir.exists():
-        console.print(f"[red]Directory {project_dir} already exists.[/red]")
-        raise SystemExit(1)
+    """Initialize a new research project.
 
-    # Scaffold
-    project_dir.mkdir(parents=True)
-    (project_dir / "ledger").mkdir()
-    (project_dir / "ledger" / "experiments.jsonl").touch()
-    (project_dir / "ledger" / "papers.jsonl").touch()
+    Works on both new and existing directories. When run on an existing
+    directory, only creates files that don't already exist — never
+    overwrites existing files.
+    """
+    project_dir = Path(path) / name
+
+    # Create directory if it doesn't exist
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    created: list[str] = []
+    skipped: list[str] = []
+
+    def _write_if_missing(filepath: Path, content: str) -> None:
+        """Write file only if it doesn't exist."""
+        if filepath.exists():
+            skipped.append(str(filepath.relative_to(project_dir)))
+        else:
+            filepath.parent.mkdir(parents=True, exist_ok=True)
+            filepath.write_text(content)
+            created.append(str(filepath.relative_to(project_dir)))
+
+    # Ledger directory
+    (project_dir / "ledger").mkdir(exist_ok=True)
+    _write_if_missing(
+        project_dir / "ledger" / "experiments.jsonl", ""
+    )
+    _write_if_missing(
+        project_dir / "ledger" / "papers.jsonl", ""
+    )
 
     # program.md
-    (project_dir / "program.md").write_text(
+    _write_if_missing(
+        project_dir / "program.md",
         f"# {name} — Research Program\n\n"
         "## Goals\n\n"
         "Describe your research goals here.\n\n"
@@ -195,7 +216,8 @@ def init(name: str, path: str) -> None:
     )
 
     # daedalus.yaml
-    (project_dir / "daedalus.yaml").write_text(
+    _write_if_missing(
+        project_dir / "daedalus.yaml",
         f"project_name: {name}\n"
         "\n"
         "runner:\n"
@@ -248,7 +270,8 @@ def init(name: str, path: str) -> None:
     )
 
     # runner_config.yaml template
-    (project_dir / "runner_config.yaml").write_text(
+    _write_if_missing(
+        project_dir / "runner_config.yaml",
         "# Local runner config\n"
         "local:\n"
         "  python: python\n"
@@ -268,13 +291,21 @@ def init(name: str, path: str) -> None:
     )
 
     # CLAUDE.md — tells Claude Code to use Daedalus MCP tools
-    claude_md = project_dir / "CLAUDE.md"
-    if not claude_md.exists():
-        claude_md.write_text(_CLAUDE_MD_TEMPLATE)
+    _write_if_missing(
+        project_dir / "CLAUDE.md",
+        _CLAUDE_MD_TEMPLATE,
+    )
 
-    console.print(f"[green]Project '{name}' initialized at {project_dir}[/green]")
-    console.print(f"  Edit [bold]{project_dir}/program.md[/bold] to define your research goals.")
-    console.print(f"  Edit [bold]{project_dir}/runner_config.yaml[/bold] to configure your runner.")
+    # Report
+    if created:
+        console.print(f"[green]Project '{name}' initialized at {project_dir}[/green]")
+        for f in created:
+            console.print(f"  [green]+[/green] {f}")
+    else:
+        console.print(f"[green]Project '{name}' already fully initialized.[/green]")
+
+    if skipped:
+        console.print(f"  [dim]Skipped {len(skipped)} existing file(s)[/dim]")
 
 
 # ---------------------------------------------------------------------------

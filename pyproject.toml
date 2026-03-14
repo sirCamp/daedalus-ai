@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "daedalus-ai"
-version = "0.2.0"
+version = "0.2.1"
 description = "AI research assistant for hypothesis-driven ML experiments. Claude Code MCP plugin for managing experiment lifecycle, dataset validation, and parameter exploration."
 readme = "README.md"
 license = "MIT"

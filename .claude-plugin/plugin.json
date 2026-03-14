@@ -1,6 +1,6 @@
 {
   "name": "daedalus-ai",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "AI research assistant for hypothesis-driven ML experiments. Manages experiment lifecycle, dataset validation, parameter exploration, and literature review.",
   "author": {
     "name": "Stefano Campese",
